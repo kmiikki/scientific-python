@@ -17,7 +17,9 @@ import sys
 import tempfile
 
 BUNDLE = Path(__file__).resolve().parent
-import science_integrity
+_integrity_spec = importlib.util.spec_from_file_location('science_install_integrity', BUNDLE / 'science_integrity.py')
+science_integrity = importlib.util.module_from_spec(_integrity_spec)
+_integrity_spec.loader.exec_module(science_integrity)
 try:
     science_integrity.verify(BUNDLE)
 except (ValueError, OSError) as exc:

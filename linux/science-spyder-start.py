@@ -8,12 +8,19 @@ import sys
 import uuid
 
 
+def load_support_module(name, filename):
+    """Load a support file by location without changing Python's import path."""
+    path = Path(__file__).resolve().parent / filename
+    spec = importlib.util.spec_from_file_location(name, path)
+    value = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(value)
+    return value
+
+
 def configure_frontend(prefix, test_profile=None):
     # A dedicated profile prevents another Spyder installation's interpreter and
     # single-instance server from redirecting this launch to a foreign kernel.
-    support = Path(__file__).resolve().parent
-    spec = importlib.util.spec_from_file_location('science_frontend_manager', support / 'science-manager.py')
-    manager = importlib.util.module_from_spec(spec); spec.loader.exec_module(manager)
+    manager = load_support_module('science_frontend_manager', 'science-manager.py')
     config_dir = Path(test_profile) if test_profile is not None else manager.prepare_settings(prefix.parent.parent)
     os.environ['SPYDER_CONFDIR'] = str(config_dir)
     from spyder.config.manager import CONF
@@ -24,16 +31,12 @@ def configure_frontend(prefix, test_profile=None):
 
 
 def startup_tools():
-    spec = importlib.util.spec_from_file_location('science_spyder_startup', Path(__file__).resolve().parent / 'science_startup.py')
-    value = importlib.util.module_from_spec(spec); spec.loader.exec_module(value)
-    return value
+    return load_support_module('science_spyder_startup', 'science_startup.py')
 
 
 def launch(arguments, prefix=None, execv=os.execv):
     prefix = Path(prefix) if prefix is not None else Path(sys.prefix)
-    support = Path(__file__).resolve().parent
-    spec = importlib.util.spec_from_file_location('science_frontend_runtime', support / 'science-runtime-check.py')
-    runtime = importlib.util.module_from_spec(spec); spec.loader.exec_module(runtime)
+    runtime = load_support_module('science_frontend_runtime', 'science-runtime-check.py')
     context = runtime.identity(prefix)
     context['status'] = 'PASS'
     # Spyder 6.1.8 find_conda prefers CONDA_EXE over MAMBA_EXE. Do not inherit

@@ -6,6 +6,8 @@ The source targets Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Windows 11 x86-64. Nat
 
 PowerShell 7.4.6 tests on Linux establish parser/helper and package-execution contract behavior. They do not establish native Windows filesystem, UAC, DLL, hook or PowerShell 5.1 acceptance. The native Micromamba contract tests install only inert synthetic noarch packages in temporary directories, with Windows target selection. They do not run Windows binaries on Linux.
 
+The [Spyder startup follow-up](spyder-startup-fix.md) passed a real headless Science kernel and temporary-profile interpreter configuration check. It does not certify GUI startup or the GUI-connected first console. This source-only delivery leaves existing installed support files unchanged.
+
 ## Configuration and updates
 
 - Six foundation requests must remain compatible with the qualified release policy.

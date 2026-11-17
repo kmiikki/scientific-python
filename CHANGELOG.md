@@ -12,6 +12,8 @@
 
 ### Fixed
 
+- Ubuntu Science activation (including isolated Python hooks), managed Spyder and kernel support resolve sibling modules independently of the working directory, with no project import-path mutation.
+
 - Windows Install/update no longer commits a fresh unconstrained online solve after approval.
 - Windows entry-point error-preference assignments and an embedded BOM in the launcher helper.
 - Ubuntu preflight preview handles reordered package lists and alternate valid media request syntax.

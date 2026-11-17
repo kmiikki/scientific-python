@@ -49,7 +49,7 @@ The phase-1/2 Windows execution gates are replaced by this checked path. Calling
 
 ## Ubuntu path
 
-The existing V4-r5.2 implementation remains: guarded roots/ownership, process checks, approved frozen transactions, bootstrap receipts, package/media verification, managed launchers and narrowly scoped removal. Release preparation fixes only the preflight display's positional assumption about media requests and updates development-version metadata.
+The existing V4-r5.2 implementation remains: guarded roots/ownership, process checks, approved frozen transactions, bootstrap receipts, package/media verification, managed launchers and narrowly scoped removal. Release preparation fixes the preflight display's positional assumption about media requests and updates development-version metadata. The Spyder follow-up also resolves file-loaded project dependencies explicitly relative to their bundle, without modifying global import paths; see the [startup fix](spyder-startup-fix.md).
 
 Read-only review checked menu dispatch, JSON loading, immutable manifests, bootstrap verification, transaction identity checks, launcher creation and removal boundaries. Isolated tests cover the changed preview and existing configuration/safety boundaries. No production environment was altered to establish readiness.
 

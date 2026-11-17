@@ -2,7 +2,15 @@
 
 Date: 2026-11-17. These checks support **v0.1.0 Development Release preparation**, not native target-system acceptance.
 
-## Completed automated checks
+## Spyder startup fix verification
+
+The focused v0.1.0 follow-up ran **26 Python tests successfully, with one PowerShell-dependent test skipped** (27 discovered). The ten new activation/startup methods cover home/unrelated working directories, source and installed-style bundles, foreign cached module names, integrity failure, managed launcher targeting and Science interpreter configuration. The original source reproduces the reported missing-module error; the corrected source passes.
+
+A real headless `spyder_kernels.console` was started using the existing Science Python with temporary profiles/caches. It executed the corrected imports from the user's home directory and verified the Science interpreter/prefix and media tool paths. All environment inventories and installed support matched; a native file-write audit confirmed that the test did not write existing home-directory settings. Concurrent live profile changes were retained. Full GUI-connected console acceptance remains pending. See the [focused report](spyder-startup-fix.md).
+
+PowerShell/Windows transaction suites below are retained initial-preparation evidence and were not rerun for this Linux-only change.
+
+## Initial preparation checks (retained evidence)
 
 | Check | Result | Scope |
 |---|---|---|
@@ -40,7 +48,7 @@ The earlier bounded package-selection and Bleach investigation evidence remains 
 
 - Native Windows 11 / Windows PowerShell 5.1 installation, removal, bootstrap, DLL/hooks and launcher acceptance.
 - Complete Ubuntu 24.04 or 26.04 remove/install acceptance.
-- Spyder GUI startup, first IPython kernel, real media/GUI checks and launcher persistence after login.
+- Spyder GUI startup and its first connected IPython console, real media/GUI checks and launcher persistence after login. The focused headless Science kernel check is recorded above.
 - Full scientific environment installation during this preparation.
 - Optional-package combination matrix, broad CUDA/GPU testing or synchronization/retirement tests.
 

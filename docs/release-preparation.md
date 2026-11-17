@@ -13,7 +13,11 @@ Prepared on 2026-11-17. This is a local development-release preparation; no GitH
 
 Windows execution is now implemented and available behind the checked approval path. Isolated native Micromamba 2.10.0 tests validate its CLI contract. This does not constitute native Windows 11 / PowerShell 5.1 acceptance.
 
-## Verification
+## Spyder startup follow-up
+
+The [focused startup fix](spyder-startup-fix.md) corrects sibling-module resolution from arbitrary working directories. Its local follow-up commit and refreshed ZIP preserve existing installed support, environments and settings. Ten new regression methods pass; full Python discovery reports 26 passed and one PowerShell-dependent skip. A real headless Science kernel executed corrected imports from the user home directory. Full GUI-connected acceptance remains pending.
+
+## Initial preparation verification (retained evidence)
 
 | Check | Result |
 |---|---|
@@ -29,7 +33,7 @@ The native contract fixtures contain only small generated text files. Test roots
 
 ## Pending acceptance and limits
 
-Native Windows 11 / PowerShell 5.1, Ubuntu 24.04/26.04 remove/install, full scientific runtime, Spyder/first kernel, desktop login persistence and optional/GPU combinations remain unaccepted. No automatic rollback, Synchronize, ownership engine or pending-retirement feature is claimed. Native acceptance and user documentation review remain the gates before treating the development release as publicly ready.
+Native Windows 11 / PowerShell 5.1, Ubuntu 24.04/26.04 remove/install, full scientific runtime, GUI-connected Spyder/first console, desktop login persistence and optional/GPU combinations remain unaccepted. No automatic rollback, Synchronize, ownership engine or pending-retirement feature is claimed. Native acceptance and user documentation review remain the gates before treating the development release as publicly ready.
 
 No unresolved approved-plan mismatch remains in the isolated supported executor paths. Unknown or unverifiable native events still stop. A partial native commit can require manual diagnosis; it is not reported as a rollback or success.
 
@@ -54,6 +58,7 @@ All Markdown intended for publication:
 - [Testing](testing.md)
 - [Release checklist](release-checklist.md)
 - [This preparation report](release-preparation.md)
+- [Spyder startup fix](spyder-startup-fix.md)
 - [Shared fixture notes](../shared/fixtures/README.md)
 
 The official [MIT license](../LICENSE) contains copyright © 2026 Kim Miikki. No bundled third-party implementation requiring a separate source license was identified in the public-source review; downloaded packages keep their own licenses, including the FFmpeg GPL variant.

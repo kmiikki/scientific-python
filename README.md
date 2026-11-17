@@ -109,7 +109,7 @@ Removing a request from JSON stops requesting it. **This release does not automa
 
 ## 📝 Known Limitations
 
-This is a development release. Native installation, Spyder startup and kernel acceptance remain pending on the three target systems. Interrupted native package commits have no guaranteed automatic rollback. See [all limitations](docs/known-limitations.md), the [technical design](docs/architecture.md) and the [test report](docs/testing.md).
+This is a development release. Full native installation and GUI-connected Spyder/kernel acceptance remain pending on the three target systems. A [focused Ubuntu startup fix](docs/spyder-startup-fix.md) passed working-directory regressions and a real headless Science kernel check. Interrupted native package commits have no guaranteed automatic rollback. See [all limitations](docs/known-limitations.md), the [technical design](docs/architecture.md) and the [test report](docs/testing.md).
 
 ## 🤝 Contributing
 

@@ -22,12 +22,22 @@ import time
 import urllib.request
 
 BUNDLE = Path(__file__).resolve().parent
-import science_integrity
+
+
+def helper(name):
+    spec = importlib.util.spec_from_file_location('science_' + name, BUNDLE / ('science_' + name + '.py'))
+    value = importlib.util.module_from_spec(spec); spec.loader.exec_module(value)
+    return value
+
+
+# File-loaded managers do not inherit this directory in sys.path. Resolve
+# project dependencies explicitly; never depend on the caller's working directory.
+science_integrity = helper('integrity')
 try:
     science_integrity.verify(BUNDLE)
 except (ValueError, OSError) as exc:
     raise SystemExit('ERROR: ' + str(exc)) from None
-import science_config
+science_config = helper('config')
 MARKER = 'managed_by=scientific-python-ubuntu'
 PATH_BEGIN = b'# >>> scientific-python command PATH >>>'
 PATH_END = b'# <<< scientific-python command PATH <<<'
@@ -42,12 +52,6 @@ _tx_spec = importlib.util.spec_from_file_location('science_transaction', BUNDLE 
 tx = importlib.util.module_from_spec(_tx_spec)
 _tx_spec.loader.exec_module(tx)
 tx.TransactionError = InstallError
-
-
-def helper(name):
-    spec = importlib.util.spec_from_file_location('science_' + name, BUNDLE / ('science_' + name + '.py'))
-    value = importlib.util.module_from_spec(spec); spec.loader.exec_module(value)
-    return value
 
 
 processes = helper('processes')

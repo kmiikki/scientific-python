@@ -7,6 +7,7 @@
 - [x] Windows approval is bound to an exact plan and checked offline execution path.
 - [x] Existing Ubuntu path reviewed without changing a live environment.
 - [x] Required automated regressions and focused transaction tests passed.
+- [x] Science activation/Spyder sibling-import fix: isolated regressions and real Micromamba activation/deactivation in a temporary root and a real headless Science kernel passed; existing installations were preserved.
 - [x] English README, platform guides, configuration and technical documentation prepared.
 - [x] MIT text and third-party scope reviewed.
 - [x] Final public-file, relative-link, secret/path and extracted-distribution audit recorded.

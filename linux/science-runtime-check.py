@@ -55,11 +55,17 @@ def frontend_receipt(prefix):
     return {'status': 'PASS', 'same_launch_as_kernel': True, 'python_in_science': True, 'ffmpeg_in_science': True, 'ffprobe_in_science': True}
 
 
-def packages(prefix):
-    import science_config
-    config = science_config.effective(BUNDLE)
-    manager = importlib.util.module_from_spec(spec := importlib.util.spec_from_file_location('science_policy_runtime', BUNDLE / 'science-manager.py'))
+def policy_manager():
+    # This module is also loaded by path from a Spyder kernel outside BUNDLE.
+    spec = importlib.util.spec_from_file_location('science_policy_runtime', BUNDLE / 'science-manager.py')
+    manager = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(manager)
+    return manager
+
+
+def packages(prefix):
+    manager = policy_manager()
+    config = manager.release()
     installed = metadata(prefix)
     manager.check_plan({'success': True}, installed, config)
     require(sys.version_info[:2] == (3, 14), 'Python 3.14 is required')
@@ -199,8 +205,8 @@ def kernel(prefix):
 def gui(prefix):
     # Preserve the combined Qt5/Qt6 probe when Matplotlib is explicitly requested.
     from qtpy.QtWidgets import QApplication
-    import science_config
-    requested={science_config.spec_name(s) for s in science_config.effective(BUNDLE)['ScientificPackages']}
+    manager = policy_manager()
+    requested={manager.spec_name(s) for s in manager.release()['ScientificPackages']}
     import cv2
     import numpy as np
     application = QApplication.instance() or QApplication([])
