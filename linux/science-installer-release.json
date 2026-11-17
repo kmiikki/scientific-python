@@ -1,0 +1,16 @@
+{
+  "InstallerVersion": "0.1.0-dev",
+  "MicromambaVersion": "2.10.0",
+  "MicromambaRelease": "2.10.0-0",
+  "MicromambaArchive": "micromamba-linux-64.tar.bz2",
+  "MicromambaArchiveSha256": "9a97976244929bbae28fb1fae504e74a3e7e6d1932870e3a03321f01b7fbd07b",
+  "MicromambaExeSha256": "701f39c06f8e6a670a0e186c8479b9e5c0502a2f0cda6cef65d83bdd2875e8bd",
+  "Python": "3.14",
+  "Spyder": "6.1.8",
+  "OpenCV": "5.0.0",
+  "OpenCVMaxExclusive": "6",
+  "FFmpeg": "9.0.2",
+  "FFmpegMaxExclusive": "10",
+  "ArrowVariant": "cpu",
+  "FFmpegMinimum": "9.0.2"
+}

@@ -1,0 +1,13 @@
+{
+  "Version": "12",
+  "MicromambaRelease": "2.10.0-0",
+  "MicromambaVersion": "2.10.0",
+  "MicromambaSha256": "f8b4284bd4eb1134122eaf93b3ea6c7be567e596de5829e1a6f478e34e41974a",
+  "Python": "3.14",
+  "Spyder": "6.1.8",
+  "OpenCV": "5.0.0",
+  "FFmpeg": "9.0.1",
+  "Revision": 2,
+  "OpenCVMaxExclusive": "6",
+  "FFmpegMaxExclusive": "10"
+}

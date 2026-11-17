@@ -1,0 +1,279 @@
+[
+  {
+    "id": "default",
+    "valid": true
+  },
+  {
+    "id": "add",
+    "valid": true,
+    "append": "pingouin"
+  },
+  {
+    "id": "remove",
+    "valid": true,
+    "remove": "seaborn"
+  },
+  {
+    "id": "version",
+    "valid": true,
+    "changes": {
+      "ScientificPackages": [
+        "numpy>=2,<3"
+      ]
+    }
+  },
+  {
+    "id": "build",
+    "valid": true,
+    "changes": {
+      "ScientificPackages": [
+        "pytorch[build='cuda*']"
+      ]
+    }
+  },
+  {
+    "id": "attrs",
+    "valid": true,
+    "changes": {
+      "ScientificPackages": [
+        "numpy[version='>=2,<3',build='py314*']"
+      ]
+    }
+  },
+  {
+    "id": "space-spec",
+    "valid": true,
+    "changes": {
+      "ScientificPackages": [
+        "numpy 2.* py314*"
+      ]
+    }
+  },
+  {
+    "id": "equals-spec",
+    "valid": true,
+    "changes": {
+      "ScientificPackages": [
+        "numpy=2.5.*=py314*"
+      ]
+    }
+  },
+  {
+    "id": "qualified",
+    "valid": true,
+    "changes": {
+      "Channels": [
+        "conda-forge",
+        "my-lab"
+      ],
+      "ScientificPackages": [
+        "my-lab::numpy>=2"
+      ]
+    }
+  },
+  {
+    "id": "channel-url",
+    "valid": true,
+    "changes": {
+      "Channels": [
+        "https://example.org/conda"
+      ],
+      "ScientificPackages": [
+        "numpy"
+      ]
+    }
+  },
+  {
+    "id": "bom",
+    "valid": true,
+    "bom": true
+  },
+  {
+    "id": "duplicate",
+    "valid": false,
+    "changes": {
+      "ScientificPackages": [
+        "numpy",
+        "numpy"
+      ]
+    }
+  },
+  {
+    "id": "conflict",
+    "valid": false,
+    "changes": {
+      "ScientificPackages": [
+        "numpy<2",
+        "numpy>=2"
+      ]
+    }
+  },
+  {
+    "id": "case-conflict",
+    "valid": false,
+    "changes": {
+      "ScientificPackages": [
+        "NumPy",
+        "numpy"
+      ]
+    }
+  },
+  {
+    "id": "empty",
+    "valid": false,
+    "changes": {
+      "ScientificPackages": []
+    }
+  },
+  {
+    "id": "scalar",
+    "valid": false,
+    "changes": {
+      "ScientificPackages": "numpy"
+    }
+  },
+  {
+    "id": "control",
+    "valid": false,
+    "changes": {
+      "ScientificPackages": [
+        "numpy\n"
+      ]
+    }
+  },
+  {
+    "id": "whitespace",
+    "valid": false,
+    "changes": {
+      "ScientificPackages": [
+        " numpy"
+      ]
+    }
+  },
+  {
+    "id": "unbalanced",
+    "valid": false,
+    "changes": {
+      "ScientificPackages": [
+        "pytorch[build='cuda*]"
+      ]
+    }
+  },
+  {
+    "id": "missing-version",
+    "valid": false,
+    "changes": {
+      "ScientificPackages": [
+        "numpy>="
+      ]
+    }
+  },
+  {
+    "id": "invalid-tail",
+    "valid": false,
+    "changes": {
+      "ScientificPackages": [
+        "numpy;rm"
+      ]
+    }
+  },
+  {
+    "id": "hidden-channel",
+    "valid": false,
+    "changes": {
+      "ScientificPackages": [
+        "secret::numpy"
+      ]
+    }
+  },
+  {
+    "id": "schema-version",
+    "valid": false,
+    "changes": {
+      "SchemaVersion": 2
+    }
+  },
+  {
+    "id": "schema-bool",
+    "valid": false,
+    "changes": {
+      "SchemaVersion": true
+    }
+  },
+  {
+    "id": "schema-float",
+    "valid": false,
+    "changes": {
+      "SchemaVersion": 1.0
+    }
+  },
+  {
+    "id": "unknown-field",
+    "valid": false,
+    "changes": {
+      "Surprise": true
+    }
+  },
+  {
+    "id": "trusted-hash",
+    "valid": false,
+    "changes": {
+      "MicromambaExeSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  {
+    "id": "bad-channel",
+    "valid": false,
+    "changes": {
+      "Channels": [
+        "conda forge"
+      ]
+    }
+  },
+  {
+    "id": "duplicate-channels",
+    "valid": false,
+    "changes": {
+      "Channels": [
+        "conda-forge",
+        "conda-forge"
+      ]
+    }
+  },
+  {
+    "id": "malformed",
+    "valid": false,
+    "raw": "{\"SchemaVersion\":"
+  },
+  {
+    "id": "duplicate-key",
+    "valid": false,
+    "raw": "{\"SchemaVersion\":1,\"SchemaVersion\":1,\"Channels\":[\"conda-forge\"],\"ScientificPackages\":[\"numpy\"]}"
+  },
+  {
+    "id": "comments",
+    "valid": false,
+    "raw": "{\"SchemaVersion\":1,//no\n\"Channels\":[\"conda-forge\"],\"ScientificPackages\":[\"numpy\"]}"
+  },
+  {
+    "id": "trailing",
+    "valid": false,
+    "raw": "{\"SchemaVersion\":1,\"Channels\":[\"conda-forge\"],\"ScientificPackages\":[\"numpy\"],}"
+  },
+  {
+    "id": "null",
+    "valid": false,
+    "raw": "null"
+  },
+  {
+    "id": "invalid-utf8",
+    "valid": false,
+    "hex": "ff"
+  },
+  {
+    "id": "double-bom",
+    "valid": false,
+    "raw": "\ufeff{\"SchemaVersion\":1,\"Channels\":[\"conda-forge\"],\"ScientificPackages\":[\"numpy\"]}",
+    "bom": true
+  }
+]

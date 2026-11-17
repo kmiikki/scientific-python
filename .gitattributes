@@ -1,0 +1,2 @@
+# Preserve exact bytes on every platform: runtime manifests hash these files.
+* -text

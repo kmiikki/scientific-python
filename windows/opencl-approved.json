@@ -1,0 +1,17 @@
+{
+  "package": {
+    "name": "khronos-opencl-icd-loader",
+    "version": "2024.10.24",
+    "build": "hfd05255_2"
+  },
+  "archive_sha256": "245bd150a9f0b922dc34f173027631a20f18b009604d827a796d792a79bac178",
+  "stock": {
+    "activate": "7fec63331a9d93a0d51b0fc034fcfe84aa2c2b6fe25987f41d222afc85850c5e",
+    "helper": "63bfe30797effe5b1fc997c1df45518aae456bb98370025f5be505115dafc51a",
+    "deactivate": "e2ed2b13136f79390fc91ef89e19eeee5bff03b1809014e693e2c2150587c58a"
+  },
+  "v11": {
+    "activate": "fac8b119deef0af028e487071074af725712fc1aab2062ccbdd1891ba8fc07ac",
+    "helper": "68f680ca4feb9bca81a592b3271abe736c18939d076078bd1fdad3c45e25b05c"
+  }
+}

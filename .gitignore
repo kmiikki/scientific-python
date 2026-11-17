@@ -1,0 +1,42 @@
+# Immutable local references and historical evidence are preserved, not published.
+/originals/
+/analysis-2026-11-17/
+/reports/
+*.zip
+*.tar.bz2
+*.conda
+*.exe
+*.dll
+*.so
+*.so.*
+
+# Persistent user configuration and receipts never belong in source control.
+**/science-release.json
+**/science-release.legacy-*.json
+**/science-config-origins.json
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Environments, package caches and temporary test/runtime output.
+**/envs/
+**/pkgs/
+**/conda-meta/
+**/.venv/
+**/venv/
+**/.mamba/
+**/.conda/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+/tmp/
+/cache/
+/test-results/
+*.log
+*.part
+*.core
+core

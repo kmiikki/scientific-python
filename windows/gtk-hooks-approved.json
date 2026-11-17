@@ -1,0 +1,20 @@
+[
+  {
+    "name": "librsvg",
+    "version": "2.58.4",
+    "build": "ha14e162_4",
+    "sha256": "d6c9e6a1e396bf30d91cd2e1ed57b49050799f0f22d672f63932b30dfc9f3fdc"
+  },
+  {
+    "name": "librsvg",
+    "version": "2.60.0",
+    "build": "hd5e4115_1",
+    "sha256": "d6c9e6a1e396bf30d91cd2e1ed57b49050799f0f22d672f63932b30dfc9f3fdc"
+  },
+  {
+    "name": "librsvg",
+    "version": "2.62.3",
+    "build": "h15cfe45_0",
+    "sha256": "d6c9e6a1e396bf30d91cd2e1ed57b49050799f0f22d672f63932b30dfc9f3fdc"
+  }
+]
