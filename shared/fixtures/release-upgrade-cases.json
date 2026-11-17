@@ -1,0 +1,219 @@
+[
+  {
+    "id": "fresh-defaults",
+    "remove": [],
+    "interactive": true,
+    "answer": "yes",
+    "missing": [],
+    "added": []
+  },
+  {
+    "id": "approve-seven",
+    "remove": [
+      "shap",
+      "pywavelets",
+      "optuna",
+      "plotly",
+      "hypothesis",
+      "polars",
+      "xgboost"
+    ],
+    "interactive": true,
+    "answer": "yes",
+    "missing": [
+      "shap",
+      "pywavelets",
+      "optuna",
+      "plotly",
+      "hypothesis",
+      "polars",
+      "xgboost"
+    ],
+    "added": [
+      "shap",
+      "pywavelets",
+      "optuna",
+      "plotly",
+      "hypothesis",
+      "polars",
+      "xgboost"
+    ]
+  },
+  {
+    "id": "decline-seven",
+    "remove": [
+      "shap",
+      "pywavelets",
+      "optuna",
+      "plotly",
+      "hypothesis",
+      "polars",
+      "xgboost"
+    ],
+    "interactive": true,
+    "answer": "no",
+    "missing": [
+      "shap",
+      "pywavelets",
+      "optuna",
+      "plotly",
+      "hypothesis",
+      "polars",
+      "xgboost"
+    ],
+    "added": []
+  },
+  {
+    "id": "empty-answer-default-no",
+    "remove": [
+      "shap",
+      "pywavelets",
+      "optuna",
+      "plotly",
+      "hypothesis",
+      "polars",
+      "xgboost"
+    ],
+    "interactive": true,
+    "answer": "",
+    "missing": [
+      "shap",
+      "pywavelets",
+      "optuna",
+      "plotly",
+      "hypothesis",
+      "polars",
+      "xgboost"
+    ],
+    "added": []
+  },
+  {
+    "id": "noninteractive-preserves",
+    "remove": [
+      "shap",
+      "pywavelets",
+      "optuna",
+      "plotly",
+      "hypothesis",
+      "polars",
+      "xgboost"
+    ],
+    "interactive": false,
+    "answer": "yes",
+    "missing": [
+      "shap",
+      "pywavelets",
+      "optuna",
+      "plotly",
+      "hypothesis",
+      "polars",
+      "xgboost"
+    ],
+    "added": []
+  },
+  {
+    "id": "constraints-extras-channels",
+    "remove": [
+      "shap",
+      "pywavelets",
+      "optuna",
+      "plotly",
+      "hypothesis",
+      "polars",
+      "xgboost"
+    ],
+    "replace": {
+      "numpy": "my-lab::numpy[version='>=2,<3',build='py314*']"
+    },
+    "append": [
+      "pingouin",
+      "pywavelets>=1"
+    ],
+    "channels": [
+      "my-lab",
+      "conda-forge"
+    ],
+    "interactive": true,
+    "answer": "Y",
+    "missing": [
+      "shap",
+      "optuna",
+      "plotly",
+      "hypothesis",
+      "polars",
+      "xgboost"
+    ],
+    "added": [
+      "shap",
+      "optuna",
+      "plotly",
+      "hypothesis",
+      "polars",
+      "xgboost"
+    ]
+  },
+  {
+    "id": "qualified-space-attributes-identities",
+    "remove": [
+      "shap",
+      "pywavelets",
+      "optuna",
+      "plotly",
+      "hypothesis",
+      "polars",
+      "xgboost"
+    ],
+    "append": [
+      "conda-forge::shap>=0",
+      "pywavelets 1.* py314*",
+      "plotly[channel='conda-forge',version='>=6']",
+      "POLARS>=1"
+    ],
+    "interactive": true,
+    "answer": "yes",
+    "missing": [
+      "optuna",
+      "hypothesis",
+      "xgboost"
+    ],
+    "added": [
+      "optuna",
+      "hypothesis",
+      "xgboost"
+    ]
+  },
+  {
+    "id": "shapely-is-not-shap",
+    "remove": [
+      "shap"
+    ],
+    "interactive": true,
+    "answer": "yes",
+    "missing": [
+      "shap"
+    ],
+    "added": [
+      "shap"
+    ]
+  },
+  {
+    "id": "custom-channels-stay",
+    "remove": [
+      "optuna"
+    ],
+    "channels": [
+      "my-lab"
+    ],
+    "append": [
+      "custom-package=1"
+    ],
+    "interactive": true,
+    "answer": "yes",
+    "missing": [
+      "optuna"
+    ],
+    "added": [
+      "optuna"
+    ]
+  }
+]

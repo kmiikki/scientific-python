@@ -31,7 +31,7 @@ function Assert-ScienceBundle {
         try {$actual=[BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($path))).Replace('-','').ToLowerInvariant()} finally {$sha.Dispose()}
         if ($actual -cne $expected) { throw "Installer SHA256 mismatch: $name" }
     }
-    foreach ($name in @('science-transaction.ps1','science-update.ps1','science-integrity.ps1','science-config.ps1','science-release.ps1','science-installer-release.json','shared/science-release.schema.json','shared/science-release.default.json','shared/StrictJson.cs')) {
+    foreach ($name in @('science-transaction.ps1','science-update.ps1','science-integrity.ps1','science-config.ps1','science-release.ps1','science-installer-release.json','shared/science-release.schema.json','shared/science-release.default.json','shared/StrictJson.cs','shared/science_package_report.py')) {
         if (-not $seen.Contains($name)) { throw "Immutable manifest is incomplete: $name" }
     }
 }

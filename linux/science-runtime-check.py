@@ -63,10 +63,25 @@ def policy_manager():
     return manager
 
 
+def package_report_tools():
+    shared=BUNDLE/'shared' if (BUNDLE/'shared').is_dir() else BUNDLE.parent/'shared'
+    spec=importlib.util.spec_from_file_location('science_package_report',shared/'science_package_report.py')
+    tools=importlib.util.module_from_spec(spec);spec.loader.exec_module(tools)
+    return tools
+
+
+def package_selection(prefix):
+    manager=policy_manager()
+    return package_report_tools().coverage(manager.release(),manager.science_config.defaults(BUNDLE),metadata(prefix).values())
+
+
 def packages(prefix):
     manager = policy_manager()
     config = manager.release()
     installed = metadata(prefix)
+    tools = package_report_tools()
+    defaults = manager.science_config.defaults(BUNDLE)
+    imports = []
     manager.check_plan({'success': True}, installed, config)
     require(sys.version_info[:2] == (3, 14), 'Python 3.14 is required')
     require(not hasattr(sys, '_is_gil_enabled') or sys._is_gil_enabled(), 'GIL must be enabled')
@@ -77,13 +92,18 @@ def packages(prefix):
     package_names = {manager.spec_name(s) for s in config['ScientificPackages']}
     aliases = {'sklearn':'scikit-learn','skimage':'scikit-image','cv2':'opencv','PIL':'pillow','netCDF4':'netcdf4','IPython':'ipython','serial':'pyserial','imageio_ffmpeg':'imageio-ffmpeg','spyder_kernels':'spyder'}
     modules = [name for name in modules if aliases.get(name, name) in package_names]
-    for package, module in {'shap':'shap','pywavelets':'pywt','optuna':'optuna','plotly':'plotly','hypothesis':'hypothesis','polars':'polars','xgboost':'xgboost'}.items():
+    for package, module in tools.RELEASE_IMPORTS.items():
         if package in package_names: modules.append(module)
     for name in modules:
+        item={'package':aliases.get(name,name).lower(),'module':name,'status':'PASS'}
         try:
             importlib.import_module(name)
         except Exception as exc:
-            raise AssertionError('Import failed: ' + name + ' (' + type(exc).__name__ + ')') from exc
+            item['status']='FAIL';imports.append(item)
+            failure=AssertionError('Import failed: ' + name + ' (' + type(exc).__name__ + ')')
+            failure.package_selection=tools.coverage(config,defaults,installed.values(),imports)
+            raise failure from exc
+        imports.append(item)
     probes = {}
     if {'numpy','numba'} <= package_names:
         import numpy as np
@@ -97,7 +117,7 @@ def packages(prefix):
     if 'shapely' in package_names:
         import shapely.geometry
         require(shapely.geometry.Point(0,0).buffer(1).area>3, 'GEOS failed');probes['geos']=True
-    return dict(probes, imports=len(modules), versions={name: installed[name]['version'] for name in ['python','opencv','ffmpeg','spyder']})
+    return dict(probes, imports=len(modules), package_selection=tools.coverage(config,defaults,installed.values(),imports), versions={name: installed[name]['version'] for name in ['python','opencv','ffmpeg','spyder']})
 
 
 def video_capabilities(prefix):
@@ -323,6 +343,9 @@ def main():
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
             result = {'status': 'FAIL', 'error_type': type(exc).__name__, 'reason': str(exc)[:1000]}
+            if args.stage == 'packages':
+                try:result['details']={'package_selection':getattr(exc,'package_selection',None) or package_selection(args.prefix)}
+                except Exception:pass  # Invalid configuration is already reported as failure.
         print('SCIENCE_RESULT=' + json.dumps(result), flush=True)
         # All probes and kernel resources have been explicitly closed above.
         os._exit(0 if result['status'] == 'PASS' else 1)

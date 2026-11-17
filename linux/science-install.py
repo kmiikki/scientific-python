@@ -463,6 +463,11 @@ def summary(mode, root, mm, status, runtime, launchers, shortcut, log, report, p
     print('Installation status: ' + status)
     print('Package installation: ' + package_status)
     print('Automatic tests     : ' + runtime.get('status', 'SKIP'))
+    selection=runtime.get('checks',{}).get('packages',{}).get('details',{}).get('package_selection',{})
+    if selection:
+        print('Requested packages/imports: '+selection['status'])
+        print('Release defaults not requested: '+(', '.join(selection['release_not_requested']) or 'none'))
+        print('Release defaults not installed: '+(', '.join(selection['release_not_installed']) or 'none'))
     print('Other environments  : ' + other_environments)
     actual_mm = current_versions(root, mm)['micromamba']
     print('Micromamba version  : ' + actual_mm + (' PASS' if actual_mm == m.release()['MicromambaVersion'] else ' PENDING (target 2.10.0)'))
@@ -508,6 +513,8 @@ def main():
     if args.action in ['install', 'validate']:
         try:
             m.science_config.initialize(BUNDLE, root=root)
+            if args.action == 'install':
+                m.science_config.offer_release_packages(BUNDLE,interactive=sys.stdin.isatty() and sys.stdout.isatty())
             config = m.release()
             m.science_config.require_workflow(config)
             print('Package configuration: ' + str(m.science_config.active_path()))

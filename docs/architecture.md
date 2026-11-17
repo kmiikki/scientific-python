@@ -53,6 +53,10 @@ The existing V4-r5.2 implementation remains: guarded roots/ownership, process ch
 
 Read-only review checked menu dispatch, JSON loading, immutable manifests, bootstrap verification, transaction identity checks, launcher creation and removal boundaries. Isolated tests cover the changed preview and existing configuration/safety boundaries. No production environment was altered to establish readiness.
 
+## Release-default configuration additions
+
+After initialization/migration, interactive installers offer missing default requests by package identity. Accepted candidates use guarded atomic replacement; declined or non-interactive runs preserve the active JSON. Both runtime checkers load `shared/science_package_report.py` by file location for pure coverage reporting and the seven import aliases. It is included in immutable manifest completeness checks and installed support copies. This does not change the native transaction or introduce package ownership/removal. See [root cause and safety contract](release-package-upgrade.md).
+
 ## Deferred work
 
 No new Synchronize command, ownership engine, pending-retirement policy, automatic rollback or optional/GPU matrix is implemented. Configuration provenance and transaction locks do not imply those features.

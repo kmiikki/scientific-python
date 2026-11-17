@@ -4,6 +4,9 @@
 
 ### Added
 
+- Opt-in release-default additions to existing JSON on interactive Install/update, preserving user constraints/channels and non-interactive behavior.
+- Separate effective-request, release-default, installed-package and recorded-import coverage in runtime reports.
+
 - Shared, validated JSON configuration with 42 default direct Conda requests.
 - Safe migration with automatic backups and preservation of user package restrictions.
 - Separate immutable installer manifests and editable user configuration.

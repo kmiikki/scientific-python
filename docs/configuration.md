@@ -41,6 +41,14 @@ The current workflow requires six compatible foundation requests: `python`, `pyt
 
 Install/update does not automatically remove an installed package because its name disappeared from JSON. It may still be a dependency, or an independently installed user package. Automatic synchronization, ownership tracking and dependency retirement are not implemented in this release. The Windows path refuses removal of any installed package name without a replacement.
 
+## Adding release defaults to an existing configuration
+
+Interactive Install/update proposes current default package names absent from your active list, including any deliberately omitted defaults. The default is **No**. Approval appends only the displayed requests; versions/builds of existing requests, user additions and channel order remain unchanged. Declining preserves the original bytes and timestamp. Non-interactive runs do not prompt or modify the file. There is no new unattended opt-in flag.
+
+A clean installation already has 42 requests. An older 35-request configuration is offered SHAP, PyWavelets, Optuna, Plotly, Hypothesis, Polars and XGBoost. Configuration approval is followed by a separate native package-event review. Declining permits success against the effective user configuration, with release-default differences reported independently. See [upgrade safety, reporting and acceptance](release-package-upgrade.md).
+
+This is an additive configuration proposal, not environment synchronization or automatic dependency removal. Normal migration still preserves the original list without silently merging new defaults.
+
 ## Channels and integrity
 
 Advanced users may change the ordered `Channels` array. Only configured channels are used for the initial solve; ambient rc channels are excluded. Channel-qualified requests must refer to a configured channel. Compatibility of additional channels is not guaranteed.

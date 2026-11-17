@@ -13,6 +13,10 @@ Prepared on 2026-11-17. This is a local development-release preparation; no GitH
 
 Windows execution is now implemented and available behind the checked approval path. Isolated native Micromamba 2.10.0 tests validate its CLI contract. This does not constitute native Windows 11 / PowerShell 5.1 acceptance.
 
+## Release-default addition follow-up
+
+The [configuration-upgrade follow-up](release-package-upgrade.md) adds an explicit, default-No proposal for absent release requests on Linux and Windows. Runtime reports distinguish effective requests, release defaults, installed records and import results. Existing user config and production environments are not changed during development. The user reports base Ubuntu 24.04 native acceptance; the new seven-package update remains a manual check.
+
 ## Spyder startup follow-up
 
 The [focused startup fix](spyder-startup-fix.md) corrects sibling-module resolution from arbitrary working directories. Its local follow-up commit and refreshed ZIP preserve existing installed support, environments and settings. Ten new regression methods pass; full Python discovery reports 26 passed and one PowerShell-dependent skip. A real headless Science kernel executed corrected imports from the user home directory. Full GUI-connected acceptance remains pending.
@@ -59,6 +63,7 @@ All Markdown intended for publication:
 - [Release checklist](release-checklist.md)
 - [This preparation report](release-preparation.md)
 - [Spyder startup fix](spyder-startup-fix.md)
+- [Release package additions](release-package-upgrade.md)
 - [Shared fixture notes](../shared/fixtures/README.md)
 
 The official [MIT license](../LICENSE) contains copyright © 2026 Kim Miikki. No bundled third-party implementation requiring a separate source license was identified in the public-source review; downloaded packages keep their own licenses, including the FFmpeg GPL variant.

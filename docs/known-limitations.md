@@ -2,7 +2,9 @@
 
 ## Acceptance pending
 
-The source targets Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Windows 11 x86-64. Native full installation/removal, Windows PowerShell 5.1, GUI/Spyder startup, first IPython kernel, desktop launcher persistence and media runtime acceptance have not been completed for this release preparation.
+The user has reported successful base Ubuntu 24.04 installation, Spyder/kernel and launcher acceptance. The [release-default addition follow-up](release-package-upgrade.md#final-ubuntu-2404-acceptance) still requires a manual seven-package update/import check. Earlier unaccepted items below describe the initial preparation evidence, not a claim that this user test was never performed.
+
+The source targets Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Windows 11 x86-64. Native Ubuntu 26.04 and Windows 11/PowerShell 5.1 installation, removal, GUI/kernel and media acceptance remain pending. The current opt-in seven-package update requires its own Ubuntu 24.04 acceptance even though the user has already accepted the base environment.
 
 PowerShell 7.4.6 tests on Linux establish parser/helper and package-execution contract behavior. They do not establish native Windows filesystem, UAC, DLL, hook or PowerShell 5.1 acceptance. The native Micromamba contract tests install only inert synthetic noarch packages in temporary directories, with Windows target selection. They do not run Windows binaries on Linux.
 
@@ -11,6 +13,7 @@ The [Spyder startup follow-up](spyder-startup-fix.md) passed a real headless Sci
 ## Configuration and updates
 
 - Six foundation requests must remain compatible with the qualified release policy.
+- Missing defaults are offered only in an interactive terminal, default No; declined differences can be offered again. No unattended config-addition flag is included.
 - There is one active per-user configuration per platform, not independent root profiles.
 - Removing a request does not automatically uninstall its package. No Synchronize, package ownership or pending-retirement feature is included.
 - Legacy native package-history restrictions may produce a solver conflict. Such conflicts stop; they are not bypassed by guessing old user intent.

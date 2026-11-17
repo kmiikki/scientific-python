@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import importlib
 import importlib.metadata as md
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -21,14 +22,18 @@ IMPORTS = ('numpy scipy pandas matplotlib seaborn sympy statsmodels sklearn skim
            'imageio xarray h5py netCDF4 pyarrow openpyxl xlsxwriter jupyterlab ipykernel IPython '
            'spyder spyder_kernels numba tqdm pint uncertainties serial pip shapely exifread imageio_ffmpeg').split()
 _bundle = Path(__file__).resolve().parent
+_shared=_bundle/'shared' if (_bundle/'shared').is_dir() else _bundle.parent/'shared'
+_spec=importlib.util.spec_from_file_location('science_package_report',_shared/'science_package_report.py')
+_package_report=importlib.util.module_from_spec(_spec);_spec.loader.exec_module(_package_report)
+_DEFAULTS=json.loads((_shared/'science-release.default.json').read_text(encoding='utf-8-sig'))
 RELEASE = json.loads((_bundle/'science-installer-release.json').read_text(encoding='utf-8-sig'))
 _user_path = Path(os.environ['LOCALAPPDATA'])/'ScientificPython/science-release.json'
 _user = json.loads(_user_path.read_text(encoding='utf-8-sig'))
 RELEASE.update(_user)
-_names = {re.match(r'[A-Za-z0-9_.-]+', s.split('::')[-1]).group().lower() for s in _user['ScientificPackages']}
+_names = {_package_report.package_name(s) for s in _user['ScientificPackages']}
 _aliases = {'sklearn':'scikit-learn','skimage':'scikit-image','cv2':'opencv','PIL':'pillow','netCDF4':'netcdf4','IPython':'ipython','serial':'pyserial','imageio_ffmpeg':'imageio-ffmpeg','spyder_kernels':'spyder'}
 IMPORTS = [m for m in IMPORTS if _aliases.get(m,m) in _names]
-IMPORTS += [m for p,m in {'shap':'shap','pywavelets':'pywt','optuna':'optuna','plotly':'plotly','hypothesis':'hypothesis','polars':'polars','xgboost':'xgboost'}.items() if p in _names]
+IMPORTS += [m for p,m in _package_report.RELEASE_IMPORTS.items() if p in _names]
 
 
 
@@ -37,6 +42,18 @@ def run(args, timeout=60):
     if p.returncode:
         raise RuntimeError('command_exit_' + str(p.returncode))
     return p.stdout + p.stderr
+
+def package_records(prefix):
+    records=[]
+    for file in (Path(prefix)/'conda-meta').glob('*.json'):
+        try:records.append(json.loads(file.read_text(encoding='utf-8')))
+        except (ValueError,OSError):pass
+    return records
+
+
+def package_selection(prefix,imports=(),records=None):
+    return _package_report.coverage(_user,_DEFAULTS,package_records(prefix) if records is None else records,imports)
+
 
 def checks(prefix=None, gui=False, camera=None):
     prefix = Path(prefix or sys.prefix).resolve()
@@ -53,16 +70,17 @@ def checks(prefix=None, gui=False, camera=None):
             return None
     check('interpreter_prefix', lambda: Path(sys.prefix).resolve() == prefix)
     check('python_release_gil', lambda: sys.version_info[:2] == tuple(map(int,RELEASE['Python'].split('.'))) and not bool(__import__('sysconfig').get_config_var('Py_GIL_DISABLED')))
+    imports=[]
     for name in IMPORTS:
         check('import_' + name, lambda name=name: importlib.import_module(name))
+        imports.append({'package':_aliases.get(name,name).lower(),'module':name,'status':result['checks']['import_'+name]['status']})
     for name in ['spyder','spyder-kernels','ipykernel','numpy','numba','opencv','shapely','ExifRead','imageio-ffmpeg']:
         try: result['versions'][name] = md.version(name if name != 'opencv' else 'opencv-python')
         except md.PackageNotFoundError: pass
     check('spyder_version', lambda: md.version('spyder') == RELEASE['Spyder'])
-    records=[]
-    for f in (prefix/'conda-meta').glob('*.json'):
-        try: records.append(json.loads(f.read_text(encoding='utf-8')))
-        except (ValueError,OSError): pass
+    records=package_records(prefix)
+    result['package_selection']=package_selection(prefix,imports,records)
+    check('effective_package_names',lambda: not result['package_selection']['missing_effective'])
     def record_ok(name, version=None, build=None):
         return any(r.get('name') == name and (version is None or re.fullmatch(version,r.get('version',''))) and
                    (build is None or re.search(build,r.get('build',''))) for r in records)
@@ -150,7 +168,8 @@ if __name__=='__main__':
     parser.add_argument('--camera',type=int)
     args=parser.parse_args()
     try: result=checks(args.prefix,args.gui,args.camera)
-    except Exception as exc: result={'success':False,'error_type':type(exc).__name__}
+    except Exception as exc:
+        result={'success':False,'error_type':type(exc).__name__,'package_selection':package_selection(Path(args.prefix or sys.prefix))}
     payload=json.dumps(result,ensure_ascii=True,indent=2)
     if args.output: Path(args.output).write_text(payload+'\n',encoding='utf-8')
     print(payload)

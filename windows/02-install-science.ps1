@@ -320,6 +320,7 @@ catch {
 
 try {
     $null=Initialize-ScienceConfiguration -Root $layout.Root
+    $null=Update-ScienceReleasePackages -Interactive (Test-ScienceInteractiveConfiguration)
     $script:ScienceRelease=Get-ScienceEffectiveRelease
     Assert-ScienceWorkflowConfiguration $script:ScienceRelease
     $packages=@(Get-SciencePackageSpecs)
@@ -560,8 +561,12 @@ $pathBeforeRuntime = $env:Path
 try {
     . (Join-Path $PSScriptRoot 'science-launcher-common.ps1')
     $env:Path = Get-ScienceSpyderPath -OriginalPath $env:Path -Science $layout.Science
-    & $pythonExe (Join-Path $PSScriptRoot 'science-runtime-check.py') --prefix $layout.Science
+    & $pythonExe (Join-Path $PSScriptRoot 'science-runtime-check.py') --prefix $layout.Science --output (Join-Path $layout.Root 'science-runtime.json')
     if ($LASTEXITCODE -ne 0) { Stop-Install 'Runtime/media checks failed. Run menu D for a redacted report.' }
+    $runtimeResult=Read-ScienceJson (Join-Path $layout.Root 'science-runtime.json')
+    Write-Host ('Requested packages/imports: '+$runtimeResult.package_selection.status)
+    Write-Host ('Release defaults not requested: '+($runtimeResult.package_selection.release_not_requested -join ', '))
+    Write-Host ('Release defaults not installed: '+($runtimeResult.package_selection.release_not_installed -join ', '))
 } finally { $env:Path = $pathBeforeRuntime }
 # Preserve the exact solved package records locally; this manifest contains no user paths.
 $manifest = & $layout.Micromamba list -p $layout.Science --json

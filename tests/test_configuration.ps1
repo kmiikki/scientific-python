@@ -177,6 +177,91 @@ try {
         . (Join-Path $root 'windows/science-update.ps1')
         Expect-Failure {Invoke-ScienceEnvironmentSync -Layout $null -Packages (Get-SciencePackageSpecs)}
     }
+
+    foreach($case in (Read-ScienceJson (Join-Path $fixtures 'release-upgrade-cases.json'))) {
+        Test-Case ('release-upgrade-'+$case.id) {
+            $value=Get-ScienceDefaultConfiguration
+            $value.ScientificPackages=@($value.ScientificPackages|Where-Object {@($case.remove) -cnotcontains (Get-ScienceSpecName $_)}|ForEach-Object {
+                $name=Get-ScienceSpecName $_
+                if($case.replace -and $case.replace.$name){$case.replace.$name}else{$_}
+            })+@($case.append|Where-Object {$null -ne $_})
+            if($case.channels){$value.Channels=@($case.channels)}
+            $path=Join-Path $work ('upgrade-'+$case.id+'/science-release.json');Put-Json $path $value
+            $before=Hash-File $path;$time=[IO.File]::GetLastWriteTimeUtc($path)
+            $missing=@(Get-ScienceMissingReleasePackages $value|ForEach-Object {Get-ScienceSpecName $_})
+            Assert-True (($missing -join '|') -ceq (@($case.missing) -join '|'))
+            $context=@{Calls=0}
+            $review={param($prompt);$context.Calls++;return $case.answer}.GetNewClosure()
+            $result=Update-ScienceReleasePackages -Path $path -Interactive $case.interactive -Reviewer $review
+            Assert-True (($result.Channels -join '|') -ceq ($value.Channels -join '|'))
+            Assert-True (($result.ScientificPackages -join '|') -ceq ((@($value.ScientificPackages)+@($case.added)) -join '|'))
+            Assert-True (($context.Calls -gt 0) -eq ($case.missing.Count -gt 0 -and $case.interactive))
+            if(-not $case.added.Count){Assert-True ((Hash-File $path) -eq $before);Assert-True ([IO.File]::GetLastWriteTimeUtc($path) -eq $time)}
+            else {
+                $before=Hash-File $path;$time=[IO.File]::GetLastWriteTimeUtc($path)
+                $again=Update-ScienceReleasePackages -Path $path -Interactive $true -Reviewer {throw 'Unexpected second prompt'}
+                Assert-True ((Hash-File $path) -eq $before);Assert-True ([IO.File]::GetLastWriteTimeUtc($path) -eq $time)
+            }
+            Assert-True (@(Get-ChildItem (Split-Path -Parent $path) -Filter '.science-config-*').Count -eq 0)
+            Assert-True (@(Get-ChildItem (Split-Path -Parent $path) -Filter 'science-release.legacy-*').Count -eq 0)
+        }
+    }
+    Test-Case 'release-upgrade-invalid-config-no-prompt-or-replacement' {
+        $path=Join-Path $work 'invalid-upgrade/science-release.json';Put-Json $path (Get-ScienceDefaultConfiguration)
+        [IO.File]::WriteAllText($path,'{bad}');$before=Hash-File $path
+        Expect-Failure {Update-ScienceReleasePackages -Path $path -Interactive $true -Reviewer {throw 'Must not prompt'}}
+        Assert-True ((Hash-File $path) -eq $before)
+    }
+    Test-Case 'release-upgrade-concurrent-edit-is-preserved' {
+        $value=Get-ScienceDefaultConfiguration;$value.ScientificPackages=@($value.ScientificPackages|Where-Object {$_ -cne 'optuna'})
+        $path=Join-Path $work 'concurrent-upgrade/science-release.json';Put-Json $path $value
+        $context=@{Hash=''}
+        $review={param($prompt);$value.Channels=@('other-lab');Put-Json $path $value;$context.Hash=Hash-File $path;return 'yes'}.GetNewClosure()
+        Expect-Failure {Update-ScienceReleasePackages -Path $path -Interactive $true -Reviewer $review}
+        Assert-True ((Hash-File $path) -eq $context.Hash)
+        Assert-True (@(Get-ChildItem (Split-Path -Parent $path) -Filter '.science-config-*').Count -eq 0)
+    }
+    Test-Case 'release-upgrade-staged-write-abort-preserves-original' {
+        $path=Join-Path $work 'abort-upgrade/science-release.json';Put-Json $path (Get-ScienceDefaultConfiguration);$before=Hash-File $path
+        Expect-Failure {Set-ScienceConfigBytes -Path $path -Bytes ([Text.Encoding]::UTF8.GetBytes('new')) -ExpectedBytes ([Text.Encoding]::UTF8.GetBytes('wrong original'))}
+        Assert-True ((Hash-File $path) -eq $before)
+        Assert-True (@(Get-ChildItem (Split-Path -Parent $path) -Filter '.science-config-*').Count -eq 0)
+    }
+    Test-Case 'release-upgrade-result-is-validated-before-write' {
+        $path=Join-Path $work 'invalid-result/science-release.json';$value=Get-ScienceDefaultConfiguration
+        $value.ScientificPackages=@($value.ScientificPackages|Where-Object {$_ -cne 'shap'});Put-Json $path $value;$before=Hash-File $path
+        $definition=(Get-Command Get-ScienceDefaultConfiguration).ScriptBlock
+        try {
+            function Get-ScienceDefaultConfiguration {return [pscustomobject]@{SchemaVersion=1;Channels=@('new-channel');ScientificPackages=@('new-channel::shap')}}
+            Expect-Failure {Update-ScienceReleasePackages -Path $path -Interactive $true -Reviewer {'yes'}}
+            Assert-True ((Hash-File $path) -eq $before)
+        } finally {Set-Item Function:Get-ScienceDefaultConfiguration $definition}
+    }
+    Test-Case 'release-upgrade-preserves-synthetic-environments' {
+        $path=Join-Path $work 'scope-upgrade/science-release.json';$value=Get-ScienceDefaultConfiguration
+        $value.ScientificPackages=@($value.ScientificPackages|Where-Object {$_ -cne 'shap'});Put-Json $path $value
+        $markers=@()
+        foreach($name in @('science','py314-opencv5-cuda')){$marker=Join-Path $work ('scope-upgrade/root/envs/'+$name+'/KEEP');[void][IO.Directory]::CreateDirectory((Split-Path -Parent $marker));[IO.File]::WriteAllText($marker,'unchanged');$markers+=,$marker}
+        $null=Update-ScienceReleasePackages -Path $path -Interactive $true -Reviewer {'yes'}
+        foreach($marker in $markers){Assert-True ([IO.File]::ReadAllText($marker) -ceq 'unchanged')}
+    }
+    Test-Case 'release-upgrade-effective-getter-reaches-updated-requests' {
+        $previousLocal=$env:LOCALAPPDATA
+        try {
+            $env:LOCALAPPDATA=Join-Path $work 'upgrade-getter'
+            $path=Get-ScienceConfigurationPath;$value=Initialize-ScienceConfiguration
+            $seven=@('shap','pywavelets','optuna','plotly','hypothesis','polars','xgboost')
+            $value.ScientificPackages=@($value.ScientificPackages|Where-Object {$seven -cnotcontains (Get-ScienceSpecName $_)});Put-Json $path $value
+            $null=Update-ScienceReleasePackages -Interactive $true -Reviewer {'yes'}
+            . (Join-Path $root 'windows/science-release.ps1')
+            $specs=@(Get-SciencePackageSpecs)
+            foreach($name in $seven){Assert-True ($specs -ccontains $name)}
+            Assert-True ($specs.Count -eq 42)
+        }finally{$env:LOCALAPPDATA=$previousLocal}
+    }
+    Test-Case 'release-upgrade-noninteractive-terminal-detection' {
+        Assert-True (-not (Test-ScienceInteractiveConfiguration)) 'Redirected test input/output must not prompt'
+    }
     $failed=@($results|Where-Object {-not $_.pass})
     Write-Host ("RESULT tests="+$results.Count+" passed="+($results.Count-$failed.Count)+" failed="+$failed.Count)
     if($failed.Count){exit 1}

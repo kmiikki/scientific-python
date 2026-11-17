@@ -13,6 +13,9 @@
 - [x] Final public-file, relative-link, secret/path and extracted-distribution audit recorded.
 - [x] First local Git commit prepared and recorded by delivery; no remote publication.
 
+- [x] Opt-in default additions and separate effective/default coverage implemented and tested in synthetic roots.
+- [ ] User performs the [seven-package Ubuntu 24.04 update acceptance](release-package-upgrade.md#final-ubuntu-2404-acceptance).
+
 ## User review before publication
 
 - [ ] Review [README](../README.md), all `docs/` Markdown, [changelog](../CHANGELOG.md) and [third-party notices](../THIRD_PARTY_NOTICES.md).

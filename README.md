@@ -8,7 +8,7 @@
 
 Set up a scientific Python workspace with **Spyder, JupyterLab, numerical tools, machine learning, image processing and video support**. A guided menu checks your setup, resolves dependencies and asks you to approve the package changes.
 
-**v0.1.0 Development Release preparation.** Windows package execution is implemented and covered by isolated contract tests. Native Windows 11 / PowerShell 5.1 and complete Ubuntu installation acceptance tests are still pending. See [known limitations](docs/known-limitations.md) before installing.
+**v0.1.0 Development Release preparation.** Windows package execution is implemented and covered by isolated contract tests. Native Windows 11 / PowerShell 5.1 and Ubuntu 26.04 acceptance are pending. Ubuntu 24.04 base installation/Spyder acceptance has been reported by the user; the seven-package update needs its final manual check. See [known limitations](docs/known-limitations.md) before installing.
 
 [Ubuntu guide](docs/ubuntu-installation.md) · [Windows guide](docs/windows-installation.md) · [Customize packages](docs/configuration.md) · [Release checklist](docs/release-checklist.md)
 
@@ -31,7 +31,7 @@ You do not need to learn Conda commands to use the installer. To customize the p
 
 | Platform | Target | Acceptance status |
 |---|---|---|
-| Ubuntu 24.04 LTS | x86-64, desktop session | Source and isolated checks passed; supervised reinstall pending |
+| Ubuntu 24.04 LTS | x86-64, desktop session | User-reported base installation/Spyder acceptance passed; seven-package update pending |
 | Ubuntu 26.04 LTS | x86-64, desktop session | Source checks passed; native acceptance pending |
 | Windows 11 | x86-64, Windows PowerShell 5.1 | Execution contract tested on Linux; native acceptance pending |
 
@@ -90,6 +90,8 @@ After selecting an installation target, the installer creates or migrates your a
 | Windows | `%LOCALAPPDATA%\ScientificPython\science-release.json` |
 
 Open that file in a text editor and change **only `ScientificPackages`**. For example, add `"pingouin"`, or replace `"numpy"` with `"numpy>=2,<3"`. Keep valid JSON commas and quotes, then run Install/update again.
+
+Interactive Install/update now offers absent release-default requests before solving. The default answer is **No**; approval appends only the displayed requests and preserves your constraints and channels. Non-interactive runs preserve the file. Effective-configuration success and release-default coverage are [reported separately](docs/release-package-upgrade.md).
 
 **You never need to calculate checksums, edit manifests, resolve dependencies by hand or run package-management commands.** The six foundation requests must remain compatible with this release's Python, Spyder, Arrow and media policy. See [configuration and migration](docs/configuration.md).
 

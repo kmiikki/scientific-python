@@ -128,7 +128,7 @@ function Convert-ScienceLegacyConfiguration {
     return Assert-ScienceConfiguration ([pscustomobject]@{SchemaVersion=1;Channels=$channels;ScientificPackages=@($requests)})
 }
 function Set-ScienceConfigBytes {
-    param([string]$Path,[byte[]]$Bytes)
+    param([string]$Path,[byte[]]$Bytes,[byte[]]$ExpectedBytes=$null)
     $parent=Split-Path -Parent $Path
     $cursor=$parent
     while ($cursor) {
@@ -144,7 +144,11 @@ function Set-ScienceConfigBytes {
     $tmp=Join-Path $parent ('.science-config-'+[Guid]::NewGuid().ToString('N'))
     try {
         [IO.File]::WriteAllBytes($tmp,$Bytes)
-        if ([IO.File]::Exists($Path)) {[IO.File]::Replace($tmp,$Path,$null)} else {[IO.File]::Move($tmp,$Path)}
+        if ($null -ne $ExpectedBytes) {
+            Assert-ScienceRegularPath $Path
+            if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($Path)) -cne [Convert]::ToBase64String($ExpectedBytes)) {throw 'Configuration changed during review; no replacement was made. Start again.'}
+        }
+        if ([IO.File]::Exists($Path)) {[IO.File]::Replace($tmp,$Path,[NullString]::Value)} else {[IO.File]::Move($tmp,$Path)}
     } finally {if ([IO.File]::Exists($tmp)) {[IO.File]::Delete($tmp)}}
 }
 function Get-ScienceConfigurationOrigins {
@@ -229,4 +233,40 @@ function Get-ScienceChannelArguments {
     $result=@('--no-rc','--override-channels','--strict-channel-priority')
     foreach ($channel in $Configuration.Channels) {$result+=@('-c',$channel)}
     return ,$result
+}
+
+function Test-ScienceInteractiveConfiguration {
+    if ($Host.Name -ne 'ConsoleHost' -or -not [Environment]::UserInteractive) {return $false}
+    foreach($argument in [Environment]::GetCommandLineArgs()) {
+        if($argument.Length -ge 5 -and '-NonInteractive'.StartsWith($argument,[StringComparison]::OrdinalIgnoreCase)){return $false}
+    }
+    try {return -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected} catch {return $false}
+}
+function Get-ScienceMissingReleasePackages {
+    param($Configuration)
+    $null=Assert-ScienceConfiguration $Configuration
+    $names=@($Configuration.ScientificPackages|ForEach-Object {Get-ScienceSpecName $_ $Configuration.Channels})
+    return @( (Get-ScienceDefaultConfiguration).ScientificPackages|Where-Object {$names -cnotcontains (Get-ScienceSpecName $_)} )
+}
+function Update-ScienceReleasePackages {
+    param([string]$Path=(Get-ScienceConfigurationPath),[bool]$Interactive=$false,[scriptblock]$Reviewer=$null)
+    Assert-ScienceRegularPath $Path
+    $original=[IO.File]::ReadAllBytes($Path)
+    $value=Assert-ScienceConfiguration (Read-ScienceJson $Path)
+    if([Convert]::ToBase64String([IO.File]::ReadAllBytes($Path)) -cne [Convert]::ToBase64String($original)){throw 'Configuration changed while reading; start again.'}
+    $missing=@(Get-ScienceMissingReleasePackages $value)
+    if(-not $missing.Count){Write-Host 'Release defaults: all default package names are requested; user constraints/channels are retained.';return $value}
+    Write-Host ('Release-default requests absent from your configuration: '+($missing -join ', '))
+    Write-Host 'Only approved missing requests will be appended. Existing requests, constraints and channels are retained.'
+    if(-not $Interactive){Write-Host 'Non-interactive: configuration preserved; release-default differences remain.';return $value}
+    $prompt='Add these release requests to your configuration? [y/N]'
+    $answer=if($Reviewer){& $Reviewer $prompt}else{Read-Host $prompt}
+    if(([string]$answer).Trim() -notmatch '^(?i:y|yes)$'){Write-Host 'Configuration preserved; installation/verification will use your effective configuration, with release-default differences reported separately.';return $value}
+    $candidate=[pscustomobject]@{SchemaVersion=$value.SchemaVersion;Channels=@($value.Channels);ScientificPackages=@($value.ScientificPackages)+$missing}
+    $null=Assert-ScienceConfiguration $candidate
+    $bytes=(New-Object Text.UTF8Encoding($false)).GetBytes(($candidate|ConvertTo-Json -Depth 32)+"`n")
+    # File.Replace retains the destination Windows ACL; no backup series is created.
+    Set-ScienceConfigBytes -Path $Path -Bytes $bytes -ExpectedBytes $original
+    Write-Host 'Approved release requests added to configuration. The package transaction still requires separate approval.'
+    return $candidate
 }

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 
 class ConfigError(ValueError):
@@ -96,7 +97,7 @@ def migrate(value,directory):
     result={'SchemaVersion':1,'Channels':value.get('Channels',['conda-forge']),'ScientificPackages':[x for x in _foundation(value) if spec_name(x) not in names]+packages}
     return validate(result,directory)
 
-def atomic_write(path,content):
+def atomic_write(path,content,expected=None):
     path=Path(path)
     _plain_path(path)
     if path.is_symlink():raise ConfigError('Refusing symlink configuration: '+str(path))
@@ -104,7 +105,12 @@ def atomic_write(path,content):
     fd,tmp=tempfile.mkstemp(prefix='.science-config-',dir=path.parent)
     try:
         with os.fdopen(fd,'wb') as stream:stream.write(content);stream.flush();os.fsync(stream.fileno())
-        os.chmod(tmp,0o600);os.replace(tmp,path)
+        mode=stat.S_IMODE(path.stat().st_mode)&0o777 if expected is not None and path.exists() else 0o600
+        os.chmod(tmp,mode)
+        if expected is not None:
+            _plain_path(path)
+            if path.read_bytes()!=expected:raise ConfigError('Configuration changed during review; no replacement was made. Start again.')
+        os.replace(tmp,path)
     finally:
         if os.path.exists(tmp):os.unlink(tmp)
 
@@ -167,3 +173,36 @@ def require_workflow(config):
     names={spec_name(s) for s in config['ScientificPackages']}
     missing=set(required)-names
     if missing:raise ConfigError('This installer phase requires foundation packages: '+', '.join(sorted(missing))+'. Configuration is preserved; no package changes started.')
+
+
+def missing_release_packages(value,directory):
+    validate(value,directory)
+    names={spec_name(s,value['Channels']) for s in value['ScientificPackages']}
+    return [s for s in defaults(directory)['ScientificPackages'] if spec_name(s) not in names]
+
+
+def offer_release_packages(directory,path=None,interactive=False,reviewer=None,output=print):
+    """Add missing default requests only after explicit interactive consent."""
+    path=Path(path) if path is not None else active_path()
+    _plain_path(path)
+    original=path.read_bytes()
+    value=validate(read_json(path),directory)
+    if path.read_bytes()!=original:raise ConfigError('Configuration changed while reading; start again.')
+    missing=missing_release_packages(value,directory)
+    if not missing:
+        output('Release defaults: all default package names are requested; user constraints/channels are retained.')
+        return value
+    output('Release-default requests absent from your configuration: '+', '.join(missing))
+    output('Only approved missing requests will be appended. Existing requests, constraints and channels are retained.')
+    if not interactive:
+        output('Non-interactive: configuration preserved; release-default differences remain.')
+        return value
+    answer=(reviewer or input)('Add these release requests to your configuration? [y/N]: ')
+    if str(answer).strip().lower() not in ('y','yes'):
+        output('Configuration preserved; installation/verification will use your effective configuration, with the release-default difference reported separately.')
+        return value
+    candidate=dict(value,ScientificPackages=value['ScientificPackages']+missing)
+    validate(candidate,directory)
+    atomic_write(path,(json.dumps(candidate,indent=2,ensure_ascii=False)+'\n').encode('utf-8'),expected=original)
+    output('Approved release requests added to configuration. The package transaction still requires separate approval.')
+    return candidate

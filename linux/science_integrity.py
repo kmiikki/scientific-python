@@ -26,6 +26,6 @@ def verify(directory):
             if cursor.is_symlink():raise ValueError('Redirected immutable component: '+name)
             cursor=cursor.parent
         if hashlib.sha256(path.read_bytes()).hexdigest()!=digest:raise ValueError('Installer SHA256 mismatch: '+name)
-    mandatory={'science_integrity.py','science_config.py','science-manager.py','science-install.py','science-installer-release.json','shared/science-release.schema.json','shared/science-release.default.json'}
+    mandatory={'science_integrity.py','science_config.py','science-manager.py','science-install.py','science-installer-release.json','shared/science-release.schema.json','shared/science-release.default.json','shared/science_package_report.py'}
     if not mandatory<=names:raise ValueError('Immutable manifest is incomplete.')
     return True

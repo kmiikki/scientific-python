@@ -2,6 +2,12 @@
 
 Date: 2026-11-17. These checks support **v0.1.0 Development Release preparation**, not native target-system acceptance.
 
+## Release-default addition follow-up
+
+The current follow-up adds shared Python/PowerShell configuration-upgrade cases and report tests. It verifies approval/decline, non-interactive preservation, identity matching, customization, atomic failures, unrelated synthetic environments and the native solve boundary. Results: Python **37/37**, PowerShell configuration **67/67**, locked transactions **23/23**, Bash/entry smoke **11/11**, source/platform manifest and Markdown audits passed. Full logs are recorded with the local delivery. The previous tables below remain historical evidence. See [configuration additions and final native acceptance](release-package-upgrade.md).
+
+No production Science installation/update is performed during this follow-up. Windows configuration and event tests run on Linux PowerShell 7.4.6; native Windows acceptance remains pending.
+
 ## Spyder startup fix verification
 
 The focused v0.1.0 follow-up ran **26 Python tests successfully, with one PowerShell-dependent test skipped** (27 discovered). The ten new activation/startup methods cover home/unrelated working directories, source and installed-style bundles, foreign cached module names, integrity failure, managed launcher targeting and Science interpreter configuration. The original source reproduces the reported missing-module error; the corrected source passes.
