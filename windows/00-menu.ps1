@@ -136,12 +136,18 @@ function Show-Info {
     Write-Host '   and all Python packages installed inside science. Micromamba is kept.'
     Write-Host '   Requires verified installer ownership and separate removal approval.'
     Write-Host ''
-    Write-Host '6  Whole-root Micromamba removal status (unavailable on Windows)'
-    Write-Host '   Whole-root removal is blocked until Windows ownership and cache exclusivity can be verified.'
+    Write-Host '6  Total Remove: entire verified Micromamba root and its environments'
     Write-Host ''
 
     Write-Host 'Supported layout status'
     Write-Host '-----------------------'
+    $inventory=Get-ScienceCleanupInventory $ScienceRelease.MicromambaSha256
+    foreach($row in $inventory.Roots){
+        Write-Host ("  Root {0} ({1}); executable verified: {2}; environments: {3}" -f $row.Root,$row.Mode,$row.VerifiedExecutable,($row.Environments -join ', '))
+        if($row.Unknown.Count){Write-Host ('    Unknown: '+($row.Unknown -join '; '))}
+    }
+    foreach($path in $inventory.External){Write-Host ("  External registered environment: $path")}
+    foreach($problem in $inventory.Problems){Write-Host ("  Inventory warning: $problem")}
     foreach ($status in @(Get-ScienceLayoutStatuses)) {
         Write-Host "$($status.Mode):"
         Write-Host "  Root       : $($status.Layout.Root)"
@@ -247,7 +253,7 @@ while ($true) {
     Write-Host ''
     Write-Host '  4  Remove Spyder user settings'
     Write-Host '  5  Remove the science environment'
-    Write-Host '  6  Whole-root Micromamba removal status (unavailable on Windows)'
+    Write-Host '  6  Total Remove: entire verified Micromamba root and its environments'
     Write-Host ''
     Write-Host '  D  Diagnostics (redacted)'
     Write-Host '  I  Info'
@@ -357,7 +363,7 @@ while ($true) {
         }
 
         '^6$' {
-            [void](Invoke-Step '05-remove-micromamba.ps1' "-Mode 'Auto'")
+            [void](Invoke-Step '05-remove-micromamba.ps1')
             Pause-Menu
             continue
         }

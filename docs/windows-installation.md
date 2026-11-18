@@ -37,7 +37,7 @@ The launcher targets the selected Science environment and applies the managed Op
 - **D — Diagnostics:** collect a diagnostic report. Inspect it before sharing.
 - **2 — Remove Spyder settings:** removes selected user settings after confirmation.
 - **5 — Remove science:** confirms the supported Science target and preserves the Micromamba installation and other environments.
-- **6 — Whole-root Micromamba removal status:** this action is blocked in the candidate. Windows root and cache exclusivity are not yet verified. No executable, root, cache or user settings are removed by this action.
+- **6 — Total Remove:** choose a detected root by number. The plan lists its environments, private cache, executable and verified integration. It requires the exact path for a non-default selection and two exact confirmations. Only eligible local NTFS roots can be removed; another root, external registration or shared cache is not part of the plan.
 
 Close Science processes and deactivate the environment before changing it. If multiple supported layouts exist, verify the selected path in the menu. Other environments are never an implied removal target.
 

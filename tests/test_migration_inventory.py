@@ -138,6 +138,11 @@ class TestCandidate(unittest.TestCase):
         other = self.home/'other-mamba'; other.mkdir()
         untouched = other/'keep.txt'; untouched.write_text('other root')
         binary = self.root/'bin/micromamba'; binary.parent.mkdir(); binary.write_text('never executed')
+        (self.meta/'history').touch()
+        additional = self.root/'envs/analysis/conda-meta'
+        additional.mkdir(parents=True)
+        (additional/'history').touch()
+        self.state.write_text('managed_by='+m.safety.PRODUCT+'\nroot_owned=true\n')
         digest = hashlib.sha256(binary.read_bytes()).hexdigest()
         identity = self.root.stat(); env_identity = self.prefix.stat()
         m.write_json(self.root/'.science-root-owner.json', dict(managed_by=m.safety.PRODUCT, scope='micromamba-binary',
@@ -147,12 +152,13 @@ class TestCandidate(unittest.TestCase):
                      prefix_identity=[env_identity.st_dev, env_identity.st_ino]))
         m.write_json(self.prefix/'.science-owner.json', dict(managed_by=m.safety.PRODUCT, root=str(self.root)))
         registry = self.home/'.conda/environments.txt'; registry.parent.mkdir()
-        registry.write_text(str(self.prefix)+'\n'+str(other)+'\n')
+        registry.write_text(str(self.prefix)+'\n'+str(additional.parent)+'\n'+str(other)+'\n')
         inventory = {'details': {str(other): {'unknown': []}}, 'unknown': [], 'external_cache_settings': []}
         with patch.object(m, 'release', return_value={'MicromambaExeSha256': digest}), patch.object(m, 'using_science', return_value=False), patch.object(m.safety, 'config_sources', return_value=[]), patch.dict(os.environ, {}, clear=True):
             with m.locked(self.root):
                 m.seal_dedicated_root(self.root)
             plan = m.total_removal_plan(self.root, self.home, inventory)
+            self.assertEqual(set(plan['tree']['prefixes']), {self.prefix, additional.parent})
             self.assertEqual(m.apply_total_removal(self.root, self.home, plan, lambda: inventory)[0], str(self.root))
         self.assertFalse(self.root.exists())
         self.assertEqual(untouched.read_text(), 'other root')
@@ -163,6 +169,24 @@ class TestCandidate(unittest.TestCase):
             with self.assertRaisesRegex(m.InstallError, 'changed after approval'):
                 m.apply_total_removal(self.root, self.home, {'changed': False}, dict)
             delete.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX mount and descriptor checks required')
+    def test_user_managed_root_lock_and_unknown_payload(self):
+        binary = self.root/'bin/micromamba'; binary.parent.mkdir(); binary.write_text('verified fixture executable')
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        (self.meta/'history').touch()
+        external = self.home/'external'; external.mkdir()
+        extra = self.prefix/'my-work.ipynb'; extra.touch()
+        inventory = {'details': {}, 'unknown': [], 'external_cache_settings': []}
+        with patch.object(m, 'release', return_value={'MicromambaExeSha256': digest}), patch.object(m, 'using_science', return_value=False), patch.object(m.safety, 'config_sources', return_value=[]), patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(m.InstallError, 'Unidentified environment entry'):
+                m.total_removal_plan(self.root, self.home, inventory)
+            extra.unlink()
+            plan = m.total_removal_plan(self.root, self.home, inventory)
+            self.assertFalse((self.root/'.science-installer.lock').exists())
+            m.apply_total_removal(self.root, self.home, plan, lambda: inventory)
+        self.assertFalse(self.root.exists())
+        self.assertTrue(external.is_dir())
 
     def test_saved_optional_config_preserved_for_other_root(self):
         path = self.home/'science-release.json'

@@ -48,7 +48,7 @@ The menu also provides:
 - **2 — Remove Spyder settings:** separate from environment removal.
 - **3 — Remove science:** validates the selected Science target and ownership, confirms removal and protects other environments.
 - **4 — Remove owned Micromamba:** separate executable removal; the menu explicitly describes preservation of root/cache. Use Science removal when only the environment should go.
-- **5 — Total Remove:** distinct from Science and executable removal. Available only for a newly provisioned root with independently verified exclusivity and an unchanged inventory. Review the full scope and type the exact requested confirmations. A root with unknown contents, external caches or unresolved shell integration is blocked.
+- **5 — Total Remove:** lists the selected root, base and all recognized environments, executable, private cache and verified external launchers. Multiple in-root environments are allowed. Installer-created roots and independently verified dedicated user roots are eligible. Unknown files, shared or external cache settings, mount points, active processes and unresolved shell integration block removal. Review the plan, type a non-default root path exactly, and enter both exact confirmations.
 - **I — Info**, **D — Diagnostics**, **V — Validation only**.
 
 Close Spyder, kernels and active Science shells before removal/update. Read the target path before confirming. A supervised remove/install acceptance test must preserve all other environments.

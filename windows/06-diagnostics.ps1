@@ -12,9 +12,12 @@ if (-not $OutputDirectory) { $OutputDirectory=Join-Path $PSScriptRoot ('diagnost
 [IO.Directory]::CreateDirectory($OutputDirectory) | Out-Null
 $layout=Resolve-ExistingScienceLayout -Mode $Mode -Interactive
 $report=@{schema=12;os_version=[Environment]::OSVersion.Version.ToString();powershell=$PSVersionTable.PSVersion.ToString();release=$ScienceRelease;environment_found=[bool]$layout}
-$report.micromamba_inventory=@(Get-ScienceMicromambaInventory $ScienceRelease.MicromambaSha256|ForEach-Object {
+$inventory=Get-ScienceCleanupInventory $ScienceRelease.MicromambaSha256
+$report.micromamba_inventory=@($inventory.Roots|ForEach-Object {
     @{layout=$_.Mode;exe_hash_verified=$_.VerifiedExecutable;environment_count=$_.Environments.Count;unknown_count=$_.Unknown.Count}
 })
+$report.external_registration_count=@($inventory.External).Count
+$report.inventory_problem_count=@($inventory.Problems).Count
 if ($layout) {
     $report.mode=$layout.Mode
     $report.safe_paths=[bool](Test-SafeMicromambaPath $layout.Root)

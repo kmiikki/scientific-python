@@ -550,7 +550,7 @@ def bootstrap(root, config, home=None, fetch=None):
     if created_root:
         root.mkdir(parents=True)
         atomic_bytes(root / '.scientific-python-installer-state',
-                     (MARKER + '\ninstaller_version=' + config['InstallerVersion'] + '\nstatus=prepared\nlayout=home\n').encode(), 0o600)
+                     (MARKER + '\ninstaller_version=' + config['InstallerVersion'] + '\nstatus=prepared\nlayout=home\nroot_owned=true\n').encode(), 0o600)
     if created_root:
         write_json(root / '.science-root-owner.json', {'managed_by': 'scientific-python-ubuntu', 'scope': 'micromamba-binary',
             'root': str(root), 'executable': str(root / 'bin/micromamba'), 'sha256': config['MicromambaExeSha256'],
@@ -1378,16 +1378,173 @@ DEDICATED_ROOT_ENTRIES = frozenset('''bin envs pkgs tmp share .scientific-python
     science-fontconfig-repair.json science-other-environments.json'''.split())
 
 
-def dedicated_tree(root):
-    unexpected = {path.name for path in root.iterdir()} - DEDICATED_ROOT_ENTRIES - {DEDICATED_ROOT_RECEIPT}
+def verify_prefix_scope(prefix, entries, science=False):
+    """Recognize package-owned paths and derived bytecode, not arbitrary user files."""
+    meta = prefix / 'conda-meta'
+    history = ownership_file(meta / 'history', package_metadata=True)
+    metadata = {'conda-meta/history'}
+    packages = set()
+    for path in meta.glob('*.json'):
+        if path.stat().st_size > 20 * 1024 * 1024 or len(metadata) > 5000:
+            raise InstallError('Conda package metadata limit exceeded: ' + str(path))
+        row = json.loads(ownership_file(path, package_metadata=True))
+        identity = '-'.join(row.get(key, '') for key in ('name', 'version', 'build'))
+        files = row.get('files')
+        if path.name != identity + '.json' or not isinstance(files, list):
+            raise InstallError('Invalid Conda package inventory: ' + str(path))
+        metadata.add('conda-meta/' + path.name)
+        for name in files:
+            if not isinstance(name, str) or not name or '\\' in name or Path(name).is_absolute() or '..' in Path(name).parts:
+                raise InstallError('Unsafe package path in ' + str(path))
+            packages.add(str(Path(name)))
+    if not metadata - {'conda-meta/history'} and history.strip():
+        raise InstallError('Conda history has no package inventory: ' + str(prefix))
+    allowed = packages | metadata | {'conda-meta/pinned'}
+    if science:
+        allowed.add('.science-owner.json')
+        support = prefix.parent.parent / 'share/scientific-python'
+        for active, group in ((True, 'activate.d'), (False, 'deactivate.d')):
+            for filename, content in (
+                ('scientific-python-spyder.sh', spyder_profile_hook(prefix.parent.parent, support, active)),
+                ('scientific-python-usage.sh', processes.hook_text(prefix, support, active)),
+            ):
+                path = 'etc/conda/' + group + '/' + filename
+                if path in entries:
+                    if ownership_file(prefix / path) != content.encode():
+                        raise InstallError('Installer activation hook was changed: ' + str(prefix / path))
+                    allowed.add(path)
+    directories = {str(parent) for path in allowed for parent in Path(path).parents}
+    for key, data in entries.items():
+        if key in allowed or stat.S_ISDIR(data[2]) and (key in directories or Path(key).name == '__pycache__'):
+            continue
+        path = Path(key)
+        if (stat.S_ISREG(data[2]) and path.parent.name == '__pycache__'
+                and re.fullmatch(r'.+\.cpython-\d+(?:\.opt-\d+)?\.pyc', path.name)
+                and str(path.parent.parent / (path.name.split('.cpython-', 1)[0] + '.py')) in packages):
+            continue
+        raise InstallError('Unidentified environment entry: ' + str(prefix / key))
+
+
+def owned_cache_paths(cache, entries):
+    """Verify both flat and channel-scoped Micromamba cache layouts."""
+    stores = {cache}
+    for key in entries:
+        path = Path(key)
+        if len(path.parts) > 4 and path.parts[1] in ('file', 'https', 'http') and path.parts[-2:] == ('info', 'index.json'):
+            stores.add(cache.parent / path.parent.parent.parent)
+    allowed = set()
+    for store in stores:
+        for ancestor in (store, *store.parents):
+            if ancestor.is_relative_to(cache):
+                allowed.add(ancestor)
+        for path in store.iterdir():
+            if path in allowed:
+                continue
+            if path.name in ('urls.txt', 'urls', '.mamba_lock') and path.is_file() and not path.is_symlink():
+                allowed.add(path)
+            elif path.name == 'cache' and path.is_dir() and not path.is_symlink():
+                allowed.add(path)
+                allowed.update(item for item in path.iterdir() if item.is_file() and not item.is_symlink()
+                               and re.fullmatch(r'[0-9a-fA-F]{8,64}(?:\.state)?\.(?:json|solv|lock)', item.name))
+            elif path.is_file() and not path.is_symlink() and re.fullmatch(r'[^/]+-[^/]+-[^/]+\.(?:conda|tar\.bz2)', path.name):
+                allowed.add(path)
+            elif path.is_dir() and not path.is_symlink() and (path / 'info/index.json').is_file():
+                info = path / 'info'
+                row = json.loads(ownership_file(info / 'index.json', package_metadata=True))
+                if path.name != '-'.join(row.get(k, '') for k in ('name', 'version', 'build')):
+                    continue
+                allowed.update({path, info})
+                if (info / 'paths.json').is_file():
+                    names = [row['_path'] for row in json.loads(ownership_file(info / 'paths.json', package_metadata=True))['paths']]
+                else:
+                    names = ownership_file(info / 'files', package_metadata=True).decode().splitlines()
+                for name in names:
+                    if not name or '\\' in name or Path(name).is_absolute() or '..' in Path(name).parts:
+                        raise InstallError('Unsafe cache package path in ' + str(path))
+                    item = path / name
+                    allowed.update(parent for parent in (item, *item.parents) if parent.is_relative_to(path))
+                allowed.update(info / name for name in (
+                    'index.json','paths.json','repodata_record.json','files','about.json','hash_input.json',
+                    'link.json','git','run_exports.json','has_prefix','no_link','no_softlink','test','recipe','licenses'))
+                for sub in ('test','recipe','licenses'):
+                    if (info / sub).is_dir() and not (info / sub).is_symlink():
+                        allowed.update((info / sub).rglob('*'))
+    for key in entries:
+        path = cache.parent / key
+        if path.is_relative_to(cache) and path not in allowed:
+            raise InstallError('Unidentified entry in the package cache: ' + str(path))
+
+
+def dedicated_tree(root, managed=True):
+    allowed = DEDICATED_ROOT_ENTRIES if managed else {'bin', 'envs', 'pkgs', '.science-installer.lock'}
+    unexpected = {path.name for path in root.iterdir()} - allowed - {DEDICATED_ROOT_RECEIPT, 'conda-meta'}
+    if (root / 'conda-meta/history').is_file():
+        for record in (root / 'conda-meta').glob('*.json'):
+            for file in json.loads(ownership_file(record, package_metadata=True)).get('files', []):
+                if isinstance(file, str) and Path(file).parts:
+                    unexpected.discard(Path(file).parts[0])
     if unexpected:
         raise InstallError('Unexpected content in root: ' + ', '.join(sorted(unexpected)))
-    if set((root / 'envs').iterdir()) != {root / 'envs/science'} or not removal_ownership(root):
-        raise InstallError('Only the verified and exclusively provisioned Science environment is covered by this root receipt.')
-    if {path.name for path in (root / 'bin').iterdir()} - {'micromamba', 'science-spyder'}:
+    envs = root / 'envs'
+    prefixes = tuple(sorted(envs.iterdir())) if envs.is_dir() else ()
+    if len(prefixes) > 128 or any(not (prefix / 'conda-meta/history').is_file() for prefix in prefixes):
+        raise InstallError('Unidentified entry inside envs or inventory limit reached.')
+    if managed and root / 'envs/science' in prefixes:
+        removal_ownership(root)
+    if not (root / 'conda-meta').exists() and {path.name for path in (root / 'bin').iterdir()} - {'micromamba', 'science-spyder'}:
         raise InstallError('Unidentified executables exist in the selected root.')
-    tree = safety.tree_plan(root, dedicated=True)
+    tree = safety.tree_plan(root, dedicated=True, prefixes=prefixes)
     entries = {key: identity for key, identity in tree['entries'].items() if key != DEDICATED_ROOT_RECEIPT}
+    if managed and (root / 'share').is_dir():
+        support = root / 'share/scientific-python'
+        if not support.is_dir() or set((root / 'share').iterdir()) != {support}:
+            raise InstallError('Unexpected installer support directory.')
+        science_integrity.verify(support)
+        manifest = ownership_file(support / 'SHA256SUMS.txt').decode().splitlines()
+        support_files = {line.split('  ', 1)[1] for line in manifest} | {'SHA256SUMS.txt', 'science-release.json'}
+        for path in support.rglob('*'):
+            name = path.relative_to(support).as_posix()
+            if (name in support_files or (path.is_dir() and any(p.startswith(name + '/') for p in support_files))):
+                continue
+            if re.fullmatch(r'science-release.previous-[0-9a-f]{64}\.json', name) and hashlib.sha256(ownership_file(path)).hexdigest() == name[25:-5]:
+                continue
+            raise InstallError('Unidentified support entry: ' + str(path))
+    if managed and (root / '.science-transactions').is_dir():
+        transaction_dir = root / '.science-transactions'
+        receipt = ownership_json(transaction_dir / '.owner.json')
+        if receipt != {'managed_by': safety.PRODUCT, 'root': str(root), 'scope': 'locked-transactions'}:
+            raise InstallError('Transaction evidence is not owned by this root.')
+        for directory in transaction_dir.iterdir():
+            if directory.name == '.owner.json':
+                continue
+            if not directory.is_dir() or not re.fullmatch(r'[a-f0-9]{64}', directory.name):
+                raise InstallError('Unidentified transaction directory: ' + str(directory))
+            lock = ownership_json(directory / 'approved-lock.json')
+            if lock.get('prefix') != str(root / 'envs/science') or tx.digest(lock) != directory.name:
+                raise InstallError('Transaction evidence disagrees with its locked identity: ' + str(directory))
+            known = {'approved-lock.json', 'explicit-local.txt', 'locked-environment.yml', 'locked-preflight.json',
+                     'committed-plan.json', 'metadata-restoration.json', 'channel', 'cache', 'private-home'}
+            for path in directory.iterdir():
+                if path.name not in known and not (path.is_dir() and re.fullmatch(r'download-prefix-[A-Za-z0-9_-]+', path.name)):
+                    raise InstallError('Unidentified transaction evidence: ' + str(path))
+            cache = directory / 'cache'
+            if cache.is_dir():
+                base = str(directory.relative_to(root)) + '/'
+                owned_cache_paths(cache, {key[len(base):]: value for key, value in entries.items() if key.startswith(base)})
+    for prefix in prefixes:
+        base = prefix.relative_to(root).as_posix() + '/'
+        verify_prefix_scope(prefix, {key[len(base):]: data for key, data in entries.items() if key.startswith(base)},
+                            science=managed and prefix.name == 'science')
+    if (root / 'conda-meta').exists():
+        reserved = (set(allowed) - {'bin'}) | {DEDICATED_ROOT_RECEIPT}
+        private = {'bin/micromamba', 'bin/science-spyder'}
+        if not any(key.startswith('bin/') and key not in private for key in entries):
+            private.add('bin')
+        verify_prefix_scope(root, {key: data for key, data in entries.items()
+                            if key.split('/')[0] not in reserved and key not in private})
+    cache = root / 'pkgs'
+    if cache.is_dir():
+        owned_cache_paths(cache, entries)
     return tree, fingerprint(entries)
 
 
@@ -1405,50 +1562,89 @@ def seal_dedicated_root(root):
 
 def total_removal_plan(root, home, inventory):
     root = guard_root(root, home, existing=True)
-    receipt = ownership_json(root / DEDICATED_ROOT_RECEIPT)
-    origin = ownership_json(root / '.science-root-owner.json')
+    origin_path = root / '.science-root-owner.json'
+    origin = ownership_json(origin_path) if os.path.lexists(origin_path) else None
     binary = root / 'bin/micromamba'
-    if (origin.get('scope') != 'micromamba-binary' or origin.get('managed_by') != safety.PRODUCT
+    digest = hashlib.sha256(ownership_file(binary)).hexdigest()
+    if digest not in {release()['MicromambaExeSha256'], *LEGACY_V3_BINARY_HASHES}:
+        raise InstallError('The selected root has no verified, independently fingerprinted executable.')
+    if origin is not None and (origin.get('scope') != 'micromamba-binary' or origin.get('managed_by') != safety.PRODUCT
             or origin.get('root') != str(root) or origin.get('executable') != str(binary)
-            or origin.get('sha256') != release()['MicromambaExeSha256']
-            or hashlib.sha256(ownership_file(binary)).hexdigest() != origin['sha256']):
-        raise InstallError('The root no longer has its original verified executable.')
-    if (inventory.get('unknown') or inventory.get('external_cache_settings') or safety.config_sources(root, home)
+            or digest != origin.get('sha256')):
+        raise InstallError('The executable disagrees with its installer ownership receipt.')
+    managed = bool(origin and read_state(root).get('root_owned') == 'true')
+    if origin and not managed:
+        raise InstallError('Binary ownership does not establish scope for an existing root with installer artifacts.')
+    if managed and origin.get('created_root_identity') is not None:
+        info = root.stat()
+        if origin['created_root_identity'] != [info.st_dev, info.st_ino]:
+            raise InstallError('Selected root identity disagrees with its creation receipt.')
+    configs = safety.config_sources(root, home)
+    def channels_only(path):
+        path = Path(path)
+        if path.is_relative_to(root) or not path.is_file() or path.stat().st_size > 32768:
+            return False
+        lines = [line for line in ownership_file(path).decode().splitlines() if not re.fullmatch(r'\s*(#.*)?', line)]
+        return bool(lines and lines[0] == 'channels:' and all(re.fullmatch(r'\s+-\s+[A-Za-z0-9_.-]+\s*', line) for line in lines[1:]))
+    if (inventory.get('unknown') or inventory.get('external_cache_settings') or any(not channels_only(path) for path in configs)
             or any(os.environ.get(key) for key in ('CONDA_ENVS_PATH', 'CONDA_ENVS_DIRS', 'MAMBA_ENVS_DIRS'))):
         raise InstallError('Unknown inventory, external cache or custom Conda/Mamba settings prevent proving an exclusive root.')
     for name, row in inventory['details'].items():
         other = Path(name)
         if other != root and (other.is_relative_to(root) or root.is_relative_to(other)):
             raise InstallError('Another detected root overlaps the selected root: ' + name)
-        if other != root and (row['unknown'] or safety.config_sources(other, home)):
+        if other != root and other.exists() and ((other / 'pkgs').is_symlink() or any(
+            not channels_only(path) for path in safety.config_sources(other, home)
+        )):
             raise InstallError('Another detected root has unknown contents or settings; cache isolation cannot be established: ' + name)
-    if using_science(root) or using_science(root / 'envs/science') or any(
-        Path(value).is_relative_to(root) for value in (os.environ.get('CONDA_PREFIX'), os.environ.get('MAMBA_ROOT_PREFIX'), os.environ.get('MAMBA_EXE')) if value
+    if not Path('/proc/self').is_dir():
+        raise InstallError('Process inventory is unavailable.')
+    if using_science(root) or using_science(root / 'envs/science') or (
+        os.environ.get('CONDA_PREFIX') and Path(os.environ['CONDA_PREFIX']).is_relative_to(root)
     ):
         raise InstallError('A process or the calling shell uses the selected root. Start a clean terminal after closing all users.')
-    tree, digest = dedicated_tree(root)
-    if receipt != {'managed_by': safety.PRODUCT, 'scope': 'dedicated-root', 'root': str(root),
-                   'identity': list(tree['identity']), 'tree_fingerprint': digest}:
-        raise InstallError('Root contents changed since verified installation. Nothing was removed.')
+    tree, _ = dedicated_tree(root, managed)
+    for prefix in tree['prefixes']:
+        if using_science(prefix):
+            raise InstallError('An active process uses ' + str(prefix))
+    if not managed and not (tree['prefixes'] or (root / 'conda-meta/history').is_file()):
+        raise InstallError('User-managed root needs independently identifiable Conda environments.')
+    if os.path.lexists(root / DEDICATED_ROOT_RECEIPT):
+        receipt = ownership_json(root / DEDICATED_ROOT_RECEIPT)
+        if not managed or any(receipt.get(k) != v for k, v in {'managed_by': safety.PRODUCT, 'scope': 'dedicated-root',
+               'root': str(root), 'identity': list(tree['identity'])}.items()):
+            raise InstallError('The recorded dedicated root identity does not match.')
     for name in ('.bashrc', '.bash_profile', '.bash_login', '.profile', '.local/share/scientific-python/micromamba-shell.sh'):
         path = home / name
         if os.path.lexists(path) and os.fsencode(root) in ownership_file(path):
             raise InstallError('Shell configuration directly references the root; review this file before removal: ' + str(path))
     registry = safety.registry_plan(home)
     if registry:
-        science = root / 'envs/science'
-        if any(path.is_relative_to(root) and path not in (root, science) for path in registry['paths']):
+        included = {root, *tree['prefixes']}
+        if any(path.is_relative_to(root) and path not in included for path in registry['paths']):
             raise InstallError('An unexpected registered environment is inside the selected root.')
+        if any(path != root and root.is_relative_to(path) for path in registry['paths']):
+            raise InstallError('An external registered environment contains the selected root.')
         registry['new'] = b''.join(line for line in registry['original'].splitlines(keepends=True)
-                                   if os.fsdecode(line.rstrip(b'\r\n')) not in (str(root), str(science)))
+                                   if os.fsdecode(line.rstrip(b'\r\n')) not in {str(item) for item in included})
     return {'tree': tree, 'registry': registry,
             'launchers': [plan for plan in launcher_removal_plan(root, home) if not Path(plan['path']).is_relative_to(root)]}
 
 
 def apply_total_removal(root, home, approved, inventory):
+    lock_name = '.science-installer.lock'
+    # A standalone Micromamba root has no installer lock until Apply.
+    # Compare before creating it and exclude only that one creation afterward.
+    if total_removal_plan(root, home, inventory()) != approved:
+        raise InstallError('Deletion plan changed after approval; no targets removed.')
+    lock_expected = lock_name in approved['tree']['entries']
     with locked(root):
         current = total_removal_plan(root, home, inventory())
-        if current != approved:
+        comparison = current
+        if not lock_expected:
+            comparison = {**current, 'tree': {**current['tree'], 'entries': {
+                name: data for name, data in current['tree']['entries'].items() if name != lock_name}}}
+        if comparison != approved:
             raise InstallError('Deletion plan changed after approval; no targets removed.')
         completed = []
         remaining = [str(root), *[item['path'] for item in current['launchers']]]

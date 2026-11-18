@@ -260,6 +260,16 @@ else {
     }
 }
 
+if(-not $rootExistedBefore -and -not $micromambaExistedBefore -and -not $state.root_file_identity){
+    # An older root is never assigned a fresh-creation identity during update.
+    . (Join-Path $PSScriptRoot 'science-root-removal.ps1')
+    try{
+        Initialize-ScienceRootNative
+        $state|Add-Member -NotePropertyName root_file_identity -NotePropertyValue ([ScienceRootNative]::Inspect($layout.Root,$false).Substring(0,26)) -Force
+    }catch{
+        Write-Warning ('Could not record optional NTFS creation identity: '+$_.Exception.Message)
+    }
+}
 Write-ScienceState -Layout $layout -State $state
 
 if ($machinePolicy -ne 'Undefined' -or $userPolicy -ne 'Undefined') {

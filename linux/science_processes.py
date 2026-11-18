@@ -80,6 +80,9 @@ def inspect(prefix,env=None,proc=Path('/proc'),own_pid=None):
             name=(process/'comm').read_text().strip();evidence=[];unreadable=[]
             if active_leases.get(pid):evidence.append('verified active Bash lease')
             try:
+                if within(os.readlink(process/'cwd'),prefix):evidence.append('working directory in selected prefix')
+            except (FileNotFoundError,PermissionError):pass
+            try:
                 executable=os.readlink(process/'exe')
                 if within(executable,prefix):evidence.append('executable in science')
             except FileNotFoundError:continue
@@ -93,7 +96,7 @@ def inspect(prefix,env=None,proc=Path('/proc'),own_pid=None):
                 for fd in (process/'fd').iterdir():
                     try:
                         target=os.readlink(fd)
-                        if within(target,prefix) and not Path(target).is_dir():evidence.append('open science file');break
+                        if within(target,prefix):evidence.append('open prefix file or directory');break
                     except FileNotFoundError:continue
             except FileNotFoundError:continue
             except PermissionError:unreadable.append('file descriptors')

@@ -359,11 +359,16 @@ def confirm_total_removal(root, is_default, reader=input, output=print):
 def total_remove_action(root, home, detected, is_default):
     plan = m.total_removal_plan(root, home, detected)
     print('DELETE the whole directory: ' + str(root))
-    print('Includes: verified Science environment, root executable, private package cache and installer files.')
+    print('DELETE executable: ' + str(root / 'bin/micromamba'))
+    print('DELETE private cache: ' + str(root / 'pkgs'))
+    if (root / 'conda-meta/history').is_file():
+        print('DELETE environment: base')
+    for prefix in plan['tree']['prefixes']:
+        print('DELETE environment: ' + str(prefix))
     for launcher in plan['launchers']:
         print('DELETE owned launcher: ' + launcher['path'])
     if plan['registry'] and plan['registry']['original'] != plan['registry']['new']:
-        print('REMOVE only registrations for this root and its Science prefix: ' + plan['registry']['path'])
+        print('REMOVE only registrations for the listed prefixes from: ' + plan['registry']['path'])
     print('PRESERVE: other roots, external environments and caches, shared Bash settings, Spyder settings and package configuration.')
     if not confirm_total_removal(root, is_default):
         print('Cancelled. Nothing was removed.')

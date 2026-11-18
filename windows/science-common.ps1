@@ -301,6 +301,91 @@ function Select-ScienceRemovalRoot {
     return $selected.Layout
 }
 
+function Get-ScienceCleanupInventory {
+    param([string]$ExpectedSha256,[string]$RegistryHome=$HOME)
+    $supported=@(Get-ScienceMicromambaInventory $ExpectedSha256)
+    $roots=@{};$problems=@();$registered=@();$external=@()
+    foreach($row in $supported){$roots[$row.Root]=$row}
+    $registryPath=Join-Path $RegistryHome '.conda\environments.txt'
+    $registry=[pscustomobject]@{Path=$registryPath;Digest='';Paths=@()}
+    if(Test-Path -LiteralPath $registryPath){
+        try{
+            Assert-ScienceRegularPath $registryPath
+            if(([IO.FileInfo]::new($registryPath)).Length -gt 256KB){throw 'Registry is too large.'}
+            $bytes=[IO.File]::ReadAllBytes($registryPath)
+            $content=[Text.UTF8Encoding]::new($false,$true).GetString($bytes)
+            $registry.Digest=(Get-FileHash -LiteralPath $registryPath -Algorithm SHA256).Hash
+            foreach($line in $content -split '\r?\n'){
+                if(-not $line){continue}
+                if($line -notmatch '^[A-Za-z]:\\' -or $line -cne [IO.Path]::GetFullPath($line)){throw 'Registry contains a noncanonical path.'}
+                $registered+=,$line
+            }
+            if($registered.Count -gt 128){throw 'Registry exceeds 128 entries.'}
+            $registry.Paths=$registered
+        }catch{$problems+=,"Conda registry: $($_.Exception.Message)"}
+    }
+    $candidates=@{}
+    foreach($scope in 'Process','User','Machine'){
+        $path=[Environment]::GetEnvironmentVariable('MAMBA_ROOT_PREFIX',$scope)
+        $binary=[Environment]::GetEnvironmentVariable('MAMBA_EXE',$scope)
+        if($path -match '^[A-Za-z]:\\' -and [IO.Directory]::Exists($path)){
+            $candidates[[IO.Path]::GetFullPath($path).TrimEnd('\')]=$binary
+        }
+    }
+    foreach($prefix in $registered+@($env:CONDA_PREFIX)){
+        if(-not $prefix -or $prefix -notmatch '^[A-Za-z]:\\'){continue}
+        if((Split-Path -Leaf (Split-Path -Parent $prefix)) -ieq 'envs'){
+            $candidate=Split-Path -Parent (Split-Path -Parent $prefix)
+            if(-not $candidates.ContainsKey($candidate) -and ([IO.File]::Exists((Join-Path $candidate 'micromamba.exe')) -or [IO.File]::Exists((Join-Path $candidate 'bin\micromamba.exe')))){
+                $candidates[$candidate]=$null
+            }
+        }elseif([IO.File]::Exists((Join-Path $prefix 'micromamba.exe')) -or [IO.File]::Exists((Join-Path $prefix 'bin\micromamba.exe'))){
+            if(-not $candidates.ContainsKey($prefix)){$candidates[$prefix]=$null}
+        }
+    }
+    foreach($command in @(Get-Command micromamba.exe -CommandType Application -All -ErrorAction SilentlyContinue|Select-Object -First 16)){
+        if(-not $command.Source){continue}
+        $path=Split-Path -Parent $command.Source
+        if((Split-Path -Leaf $path) -ieq 'bin'){$path=Split-Path -Parent $path}
+        if(([IO.Directory]::Exists((Join-Path $path 'envs')) -or [IO.Directory]::Exists((Join-Path $path 'pkgs'))) -and -not $candidates.ContainsKey($path)){
+            $candidates[$path]=$command.Source
+        }
+    }
+    if($candidates.Count -gt 64){$problems+=,'Candidate root inventory exceeded 64 entries.'}
+    foreach($path in @($candidates.Keys|Sort-Object|Select-Object -First 64)){
+        if($roots.ContainsKey($path)){continue}
+        $binary=@((Join-Path $path 'micromamba.exe'),(Join-Path $path 'bin\micromamba.exe'),$candidates[$path]) |
+            Where-Object {$_ -and (Test-PathWithin $_ $path) -and [IO.File]::Exists($_)} | Select-Object -Unique -First 2
+        $layout=[pscustomobject]@{Mode='Existing';Root=$path;Envs=(Join-Path $path 'envs');Science=(Join-Path $path 'envs\science');Pkgs=(Join-Path $path 'pkgs');
+            Bin=$(if($binary.Count -eq 1){Split-Path -Parent $binary});Micromamba=$(if($binary.Count -eq 1){[string]$binary});
+            State=(Join-Path $path '.scientific-python-install-state.json');Tmp=(Join-Path $path 'tmp');Config=(Join-Path $path '.mambarc')}
+        $unknown=@();$envs=@();$verified=$false
+        try{
+            $cur=[IO.DirectoryInfo]::new($path)
+            while($cur){if($cur.Exists -and ($cur.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Redirected root.'};$cur=$cur.Parent}
+            if([IO.File]::Exists((Join-Path $path 'conda-meta\history'))){$envs+=,'base'}
+            if([IO.Directory]::Exists($layout.Envs)){
+                if(([IO.DirectoryInfo]::new($layout.Envs)).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Redirected envs.'}
+                $items=@([IO.Directory]::EnumerateFileSystemEntries($layout.Envs)|Select-Object -First 129)
+                if($items.Count -gt 128){throw 'Environment inventory exceeds 128 entries.'}
+                foreach($item in $items){
+                    try{Assert-ScienceRegularPath (Join-Path $item 'conda-meta\history');$envs+=,(Split-Path -Leaf $item)}
+                    catch{$unknown+=,(Split-Path -Leaf $item)}
+                }
+            }
+            if($layout.Micromamba){
+                Assert-ScienceRegularPath $layout.Micromamba
+                $verified=(Get-FileHash -LiteralPath $layout.Micromamba -Algorithm SHA256).Hash -ieq $ExpectedSha256
+            }else{$unknown+=,'No unambiguous executable association'}
+        }catch{$unknown+=,$_.Exception.Message}
+        $roots[$path]=[pscustomobject]@{Mode='Existing';Root=$path;Layout=$layout;VerifiedExecutable=$verified;Environments=$envs;Unknown=$unknown}
+    }
+    foreach($path in $registered){
+        if(-not @($roots.Keys|Where-Object {$_ -ieq $path -or (Split-Path -Parent $path) -ieq (Join-Path $_ 'envs')}).Count){$external+=,$path}
+    }
+    return [pscustomobject]@{Roots=@($roots.Values|Sort-Object Root);Registry=$registry;External=$external;Problems=$problems}
+}
+
 function Select-ScienceInstallLayout {
     param(
         [ValidateSet('Auto', 'Home', 'Safe')]
@@ -310,7 +395,7 @@ function Select-ScienceInstallLayout {
     )
 
     $statuses = @(Get-ScienceLayoutStatuses)
-    $footprints = @($statuses | Where-Object { $_.HasFootprint })
+    $footprints = @($statuses | Where-Object { $_.ScienceExists -or ($_.RootExists -and ($_.MicromambaExists -or $_.StateExists)) })
     $homeSafety = Get-HomePathSafety
 
     $recommendedMode = $null
@@ -322,18 +407,18 @@ function Select-ScienceInstallLayout {
     }
     elseif ($footprints.Count -eq 1) {
         $recommendedMode = $footprints[0].Mode
-        $reason = "An existing supported $recommendedMode layout was detected."
+        $reason = "Existing: a supported $recommendedMode installation was detected."
     }
     elseif ($footprints.Count -gt 1) {
         $reason = 'Both supported layouts have existing files. The installer will not guess.'
     }
     elseif ($homeSafety.IsSafe) {
         $recommendedMode = 'Home'
-        $reason = 'The HOME-based micromamba paths pass the conservative safe-path check.'
+        $reason = 'Recommended for a new installation: Home paths pass the safety check.'
     }
     else {
         $recommendedMode = 'Safe'
-        $reason = 'The HOME-based micromamba paths contain characters that are risky for the Windows micromamba/Spyder toolchain.'
+        $reason = 'Recommended for a new installation: Safe layout avoids risky characters in Home paths.'
     }
 
     $selectedMode = $recommendedMode

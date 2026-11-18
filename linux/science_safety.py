@@ -97,7 +97,7 @@ def mount_points():
     return result
 
 
-def tree_plan(target, dedicated=False):
+def tree_plan(target, dedicated=False, prefixes=()):
     target=plain_path(target)
     if not target.is_dir(): raise SafetyError('Removal target must be a directory.')
     if not getattr(shutil.rmtree,'avoids_symlink_attacks',False):
@@ -111,7 +111,7 @@ def tree_plan(target, dedicated=False):
     for directory, dirs, files in os.walk(target,followlinks=False,onerror=failure):
         directory=Path(directory)
         # Nested Python/Conda environments are independent data, even under science.
-        if directory!=target and ('pyvenv.cfg' in files or 'conda-meta' in dirs) and not (dedicated and directory==target/'envs/science'):
+        if 'pyvenv.cfg' in files or (directory!=target and 'conda-meta' in dirs and directory not in prefixes):
             raise SafetyError('Nested Python/Conda environment must be preserved: '+str(directory))
         for name in dirs+files:
             path=directory/name; entry=path.lstat()
@@ -127,12 +127,12 @@ def tree_plan(target, dedicated=False):
                 if stat.S_ISLNK(entry.st_mode) and not path.resolve().is_relative_to(target):
                     raise SafetyError('Link leaves the dedicated root: '+str(path))
             snapshot[str(path.relative_to(target))]=(entry.st_dev,entry.st_ino,entry.st_mode,entry.st_size,entry.st_mtime_ns)
-    return {'target':str(target),'identity':(info.st_dev,info.st_ino),'entries':snapshot,'dedicated':dedicated}
+    return {'target':str(target),'identity':(info.st_dev,info.st_ino),'entries':snapshot,'dedicated':dedicated,'prefixes':tuple(prefixes)}
 
 
 def remove_tree(plan):
     target=Path(plan['target'])
-    if tree_plan(target,dedicated=plan.get('dedicated',False))!=plan: raise SafetyError('Removal tree changed during review; retry without concurrent writers.')
+    if tree_plan(target,dedicated=plan.get('dedicated',False),prefixes=plan.get('prefixes',()))!=plan: raise SafetyError('Removal tree changed during review; retry without concurrent writers.')
     with directory_fd(target.parent) as parent:
         info=os.stat(target.name,dir_fd=parent,follow_symlinks=False)
         if (info.st_dev,info.st_ino)!=tuple(plan['identity']) or not stat.S_ISDIR(info.st_mode):
