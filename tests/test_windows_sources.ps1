@@ -11,14 +11,15 @@ $record=[pscustomobject]@{
     url="$source/win-64/_libavif_api-1.3.0-h123_2.conda"
 }
 $layout=[pscustomobject]@{Root='/fixture';Pkgs='/fixture/pkgs';Micromamba='inert'}
-$fixture=@{Calls=0;Output=@($record);ExitCode=0}
+$fixture=@{Calls=0;Output=@($record);ExitCode=0;Spec='_libavif_api==1.3.0=h123_2';BadJson=$false}
 function Invoke-ScienceNative {
     param($Executable,$Arguments,$Environment)
     $fixture.Calls++
-    if($Arguments -cnotcontains 'repoquery' -or $Arguments -cnotcontains $source -or $Arguments -cnotcontains '_libavif_api==1.3.0=h123_2'){
+    if($Arguments -cnotcontains 'repoquery' -or $Arguments -cnotcontains $source -or $Arguments -cnotcontains $fixture.Spec){
         throw 'Unexpected metadata query.'
     }
     if($Environment['MAMBA_SSL_VERIFY'] -cne 'true'){throw 'TLS verification is required.'}
+    if($fixture.BadJson){return @{ExitCode=0;Stdout='{"secret":"never-log-this",'} }
     return @{ExitCode=$fixture.ExitCode;Stdout=(@{query=@{type='search'};result=@{status='OK';pkgs=$fixture.Output}}|ConvertTo-Json -Depth 12)}
 }
 function Check {
@@ -53,24 +54,61 @@ foreach($url in @('http://conda.anaconda.org/test','ftp://host/unsafe','https://
     $unsafe.url=$url
     Reject {Get-ScienceSourceRepairs $layout @($unsafe) @('conda-forge')} 'Unsafe|stable HTTPS|filename'
 }
-foreach($field in @('version','build','subdir','sha256','url')) {
+foreach($field in @('version','build','subdir','sha256','fn','url')) {
     $candidate=$record.PSObject.Copy()
     $candidate.$field=switch($field){
         version {'1.4.0'}
         build {'different'}
         subdir {'noarch'}
         sha256 {'b'*64}
+        fn {'different.conda'}
         url {"https://mirror.invalid/win-64/$($record.fn)"}
     }
     $fixture.Output=@($candidate)
-    Reject {Get-ScienceSourceRepairs $layout @($legacy) @('conda-forge')} 'could not verify a unique source'
+    $label=switch($field){subdir {'subdirectory'} fn {'filename'} default {$field}}
+    Reject {Get-ScienceSourceRepairs $layout @($legacy) @('conda-forge')} "candidates=1, verified=0.*${label}=1"
 }
 $fixture.Output=@($record,$record)
-Reject {Get-ScienceSourceRepairs $layout @($legacy) @('conda-forge')} 'could not verify a unique source'
+Reject {Get-ScienceSourceRepairs $layout @($legacy) @('conda-forge')} 'candidates=2, verified=2'
 $fixture.Output=@()
-Reject {Get-ScienceSourceRepairs $layout @($legacy) @('conda-forge')} 'could not verify a unique source'
+Reject {Get-ScienceSourceRepairs $layout @($legacy) @('conda-forge')} 'candidates=0, verified=0'
 $fixture.ExitCode=7
-Reject {Get-ScienceSourceRepairs $layout @($legacy) @('conda-forge')} 'metadata query failed'
+Reject {Get-ScienceSourceRepairs $layout @($legacy) @('conda-forge')} 'metadata query failed \(batch 1, 1 requests, exit 7\)'
 $missing.sha256=''
 Reject {Get-ScienceSourceRepairs $layout @($missing) @('conda-forge')} 'SHA256 identity'
+$fixture.ExitCode=0
+$fixture.BadJson=$true
+Reject {Get-ScienceSourceRepairs $layout @($legacy) @('conda-forge')} 'invalid JSON \(batch 1, 1 requests\)\.$'
+$fixture.BadJson=$false
+$fixture.Output=$record
+Reject {Get-ScienceSourceRepairs $layout @($legacy) @('conda-forge')} 'did not return a valid package list'
+
+# Real Micromamba 2.10.0 returns %21 for the epoch delimiter in the URL
+# but leaves the version and filename literal.
+$x264=[pscustomobject]@{
+    name='x264'; version='1!164.3095'; build='pl5321h71a6e3e_3'; subdir='win-64'
+    sha256='e43f0cd29479ec1b53f62986b59cd6213953ab22ca6335fca7a5fcc63463f58e'
+    fn='x264-1!164.3095-pl5321h71a6e3e_3.conda'
+    url='https://conda.anaconda.org/conda-forge/win-64/x264-1%21164.3095-pl5321h71a6e3e_3.conda'
+}
+$old=$x264.PSObject.Copy()
+$old.url='file:///C:/fixture/'+$old.fn
+$fixture.Spec='x264==1!164.3095=pl5321h71a6e3e_3'
+$fixture.Output=@($x264)
+$repair=Get-ScienceSourceRepairs $layout @($old) @('conda-forge')
+Check ($repair.x264.url -ceq $x264.url -and $repair.x264.fn -ceq $old.fn -and $old.url.StartsWith('file:')) 'Encoded x264 filename did not verify without changing its input.'
+$literal=$x264.PSObject.Copy()
+$literal.url=$literal.url.Replace('%21','!')
+$fixture.Output=@($x264,$literal)
+Reject {Get-ScienceSourceRepairs $layout @($old) @('conda-forge')} 'candidates=2, verified=2'
+foreach($badUrl in @(
+    $x264.url.Replace('%21','%2521'), $x264.url.Replace('/x264','/%2e%2e%2fx264'),
+    $x264.url.Replace('conda-forge/','conda%2dforge/'), $x264.url.Replace('conda.anaconda.org/','conda.anaconda.org:443/'),
+    $x264.url.Replace('https://','https://user:secret@'), ($x264.url+'?token=secret'), ($x264.url+'#secret')
+)){
+    $candidate=$x264.PSObject.Copy()
+    $candidate.url=$badUrl
+    $fixture.Output=@($candidate)
+    Reject {Get-ScienceSourceRepairs $layout @($old) @('conda-forge')} 'candidates=1, verified=0, rejected at first check: (url|filename)=1\.$'
+}
 Write-Host 'RESULT package-source checks passed'

@@ -1,0 +1,9 @@
+# Windows recovery: x264 source verification
+
+Micromamba 2.10.0 returns exactly one candidate for the x264 MatchSpec `x264==1!164.3095=pl5321h71a6e3e_3`. Its JSON has a literal `!` in `version` and `fn`, and an escaped `%21` in the download URL. A single query and a 75-request batch both return the same record. The previously installed record has a local explicit-transaction URL.
+
+The old recovery code accepted the candidate identity and filename but then required the raw URL to equal the trusted origin, subdirectory and unescaped filename joined as text. The new check still requires the exact trusted HTTPS origin, channel and subdirectory. It permits encoding in the final filename segment only, and requires that decoding it once yields the exact verified filename. The SHA-256, name, version, build, subdirectory and uniqueness conditions remain mandatory. Query strings, fragments, user information, different origins, path traversal and double-encoded filenames are rejected.
+
+When source verification fails, the installer shows the number of candidates for the package, the number verified and the first check that rejected each candidate. Invalid native JSON or result shape identifies the batch and request count. Neither diagnostic includes raw URLs, query arguments or native output.
+
+Re-test through `windows/00-menu.ps1` in Windows PowerShell 5.1. With a matching recovery lock, select the existing Home installation and approve **Finish installation using those installed packages?** when you intend to exercise recovery. After the source plan is displayed, decline **Restore the verified conda-forge sources for these installed packages?** for a non-applying acceptance check. The expected result is a controlled cancellation after source verification; no package transaction is needed. Actual metadata restoration and installer finalization require the user's separate approval.

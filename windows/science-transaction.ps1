@@ -160,10 +160,14 @@ function Get-ScienceCondaForgeRecords {
         $end=[Math]::Min($start+74,$Records.Count-1)
         $specs=@($Records[$start..$end]|ForEach-Object {"$($_.name)==$($_.version)=$($_.build)"})
         $arguments=@('repoquery','search','--no-rc','-r',$Layout.Root,'--override-channels','-c',$source,'--repodata-ttl','0','--platform','win-64','--json')+$specs
+        $batch=[int]($start/75)+1
         $result=Invoke-ScienceNative $Layout.Micromamba $arguments $environment
-        if($result.ExitCode -ne 0){throw "Conda-forge metadata query failed (exit $($result.ExitCode))."}
-        $reply=ConvertFrom-ScienceTransactionJson $result.Stdout
-        if($reply.query.type -cne 'search' -or $reply.result.status -cne 'OK'){throw 'Conda-forge search did not return package metadata.'}
+        if($result.ExitCode -ne 0){throw "Conda-forge metadata query failed (batch $batch, $($specs.Count) requests, exit $($result.ExitCode))."}
+        try {$reply=ConvertFrom-ScienceTransactionJson $result.Stdout}
+        catch {throw "Conda-forge metadata query returned invalid JSON (batch $batch, $($specs.Count) requests)."}
+        if($reply.query.type -cne 'search' -or $reply.result.status -cne 'OK' -or $reply.result.pkgs -isnot [array]){
+            throw "Conda-forge search did not return a valid package list (batch $batch, $($specs.Count) requests)."
+        }
         $reply.result.pkgs
     }
 }
@@ -202,15 +206,37 @@ function Get-ScienceSourceRepairs {
     foreach($name in $legacy.Keys) {
         $item=$legacy[$name]
         $signature=Get-ScienceIdentity $item.Record
+        $counts=[ordered]@{candidates=0;version=0;build=0;subdirectory=0;sha256=0;filename=0;url=0}
         $matches=@(foreach($candidate in $rows) {
-            if($candidate.name -cne $name -or $candidate.version -cne $item.Record.version -or $candidate.build -cne $item.Record.build -or $candidate.subdir -cne $item.Record.subdir -or $candidate.sha256 -cne $item.Record.sha256){continue}
-            if((Get-ScienceIdentity $candidate) -cne $signature){continue}
-            $fn=Get-ScienceArtifactName $candidate
-            if($item.Filename -and $fn -cne $item.Filename){continue}
-            if($candidate.url -cne "$source/$($candidate.subdir)/$fn"){continue}
+            if($candidate.name -cne $name){continue}
+            $counts.candidates++
+            if($candidate.version -cne $item.Record.version){$counts.version++;continue}
+            if($candidate.build -cne $item.Record.build){$counts.build++;continue}
+            if($candidate.subdir -cne $item.Record.subdir){$counts.subdirectory++;continue}
+            if($candidate.sha256 -cne $item.Record.sha256 -or (Get-ScienceIdentity $candidate) -cne $signature){$counts.sha256++;continue}
+
+            # Require the literal trusted origin/channel/platform. Only the
+            # final filename may be URL encoded (e.g. x264's epoch '!' as %21).
+            $prefix="$source/$($candidate.subdir)/"
+            $candidateUrl=[string]$candidate.url
+            if(-not $candidateUrl.StartsWith($prefix,[StringComparison]::Ordinal)){$counts.url++;continue}
+            $leaf=$candidateUrl.Substring($prefix.Length)
+            if($leaf -cnotmatch '^(?:[A-Za-z0-9_.+!-]|%[0-9A-Fa-f]{2})+\z'){$counts.url++;continue}
+            try {$fn=Get-ScienceArtifactName $candidate}
+            catch {$counts.filename++;continue}
+            if([Uri]::UnescapeDataString($leaf) -cne $fn){$counts.url++;continue}
+            if($item.Filename -and $fn -cne $item.Filename){$counts.filename++;continue}
             [pscustomobject]@{url=$candidate.url;channel=$source;fn=$fn}
         })
-        if($matches.Count -ne 1){throw "Conda-forge could not verify a unique source for $name (version, build, subdirectory and SHA256 must all match)."}
+        if($matches.Count -ne 1){
+            $rejected=@(foreach($field in @('version','build','subdirectory','sha256','filename','url')){
+                if($counts[$field]){"${field}=$($counts[$field])"}
+            }) -join ', '
+            if(-not $rejected){$rejected='none'}
+            $record=$item.Record
+            throw ("Conda-forge could not verify a unique source for {0} {1} {2} ({3}): candidates={4}, verified={5}, rejected at first check: {6}." -f
+                $name,$record.version,$record.build,$record.subdir,$counts.candidates,$matches.Count,$rejected)
+        }
         $repairs[$name]=$matches[0]
     }
     return $repairs
