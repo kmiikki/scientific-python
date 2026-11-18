@@ -10,11 +10,14 @@ import os
 from pathlib import Path
 import platform
 import re
+import signal
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 BUNDLE = Path(__file__).resolve().parent
 _integrity_spec = importlib.util.spec_from_file_location('science_install_integrity', BUNDLE / 'science_integrity.py')
@@ -47,10 +50,11 @@ def index_file(home):
 
 def read_index(home):
     path = index_file(home)
-    if path.is_symlink(): raise m.InstallError('Symlinked installation index refused.')
+    m.safety.plain_path(path, missing=True)
     if not path.exists(): return []
+    if not path.is_file() or path.stat().st_size > 256 * 1024: raise m.InstallError('Installation index is not a bounded regular file.')
     value = json.loads(path.read_text())
-    if not isinstance(value, list): raise m.InstallError('Invalid installation index.')
+    if not isinstance(value, list) or not all(isinstance(item, str) and Path(item).is_absolute() for item in value): raise m.InstallError('Invalid installation index.')
     return value
 
 
@@ -65,44 +69,134 @@ def expand_path(value, home):
 def detect(home=None, env=None, runner=m.run_process):
     home = Path(home) if home is not None else Path.home()
     env = os.environ if env is None else env
-    roots = {}; executables = []
+    roots = {}; executables = []; unverified = []; matched = {}
+    policy = m.science_config.read_json(BUNDLE / 'science-installer-release.json')
+    allowed_hashes = {policy['MicromambaExeSha256'], *m.LEGACY_V3_BINARY_HASHES}
     def root(value, source):
         if not value: return
-        path = expand_path(value, home)
-        roots.setdefault(str(path), []).append(source)
+        path = Path(value)
+        if path.is_absolute() and '..' not in path.parts and len(roots) < 64:
+            sources = roots.setdefault(str(path), [])
+            if source not in sources:
+                sources.append(source)
     def exe(value):
-        if value:
-            path = Path(value)
-            if path.is_file() and os.access(path, os.X_OK) and str(path.resolve()) not in executables:
-                executables.append(str(path.resolve()))
+        if not value or len(executables) + len(unverified) >= 32:
+            return
+        path = Path(value)
+        if str(path) in executables or str(path) in unverified:
+            return
+        try:
+            m.safety.plain_path(path)
+            info = path.lstat()
+            if not path.is_file() or info.st_size > 100 * 1024 * 1024 or info.st_mode & 0o022 or not os.access(path, os.X_OK):
+                raise ValueError('Untrusted executable file')
+            if hashlib.sha256(m.safety.read_regular(path)[0]).hexdigest() not in allowed_hashes:
+                raise ValueError('Unknown executable fingerprint')
+        except (OSError, ValueError, m.safety.SafetyError):
+            unverified.append(str(path))
+            return
+        executables.append(str(path))
     root(env.get('MAMBA_ROOT_PREFIX'), 'MAMBA_ROOT_PREFIX')
+    if env.get('CONDA_PREFIX'):
+        prefix = Path(env['CONDA_PREFIX'])
+        if prefix.parent.name == 'envs':
+            root(str(prefix.parent.parent), 'active Conda prefix')
     exe(env.get('MAMBA_EXE'))
     exe(shutil.which('micromamba', path=env.get('PATH', '')))
     bashrc = home / '.bashrc'
-    text = bashrc.read_text(errors='replace') if bashrc.is_file() else ''
+    try:
+        m.safety.plain_path(bashrc)
+        text = bashrc.read_text(errors='replace') if bashrc.is_file() and bashrc.stat().st_size <= 256 * 1024 else ''
+    except (m.safety.SafetyError, OSError):
+        text = ''
     # Inspect literal assignments without sourcing arbitrary user shell code.
     for name, value in re.findall(r'''(?:export\s+)?(MAMBA_ROOT_PREFIX|MAMBA_EXE)\s*=\s*['"]?([^'";\n]+)''', text):
         value = value.strip().replace('${HOME}', str(home)).replace('$HOME', str(home))
         if '$' in value or '`' in value: continue
         if name == 'MAMBA_EXE': exe(value)
         else: root(value, 'Bash activation')
-    for path in [home / 'micromamba', home / '.local/share/mamba', *[Path(r) for r in read_index(home)]]:
-        if path.is_dir():
-            state = m.read_state(path)
-            if state or (path / 'envs').is_dir() or (path / 'pkgs').is_dir(): root(str(path), 'existing directory/state')
-            exe(path / 'bin/micromamba')
-            if state.get('micromamba_exe'): exe(state['micromamba_exe'])
-    # info reports the actual root, independently of the executable location.
+    external = []; unknown = []
+    try:
+        registry_path = home / '.conda/environments.txt'
+        m.safety.plain_path(registry_path, missing=True)
+        if registry_path.exists() and registry_path.stat().st_size > 256 * 1024:
+            raise ValueError('Environment registry exceeds the inventory bound')
+        registered = (m.safety.registry_plan(home) or {'paths': []})['paths']
+    except (m.safety.SafetyError, OSError, ValueError) as error:
+        registered = []; unknown.append('Environment registry: ' + str(error))
+    try:
+        indices = read_index(home)
+    except (m.safety.SafetyError, m.InstallError, OSError, ValueError) as error:
+        indices = []; unknown.append('Installation index: ' + str(error))
+    known = {home / 'micromamba', home / '.local/share/mamba', *map(Path, roots), *map(Path, indices[:32])}
+    for prefix in registered[:128]:
+        parent = prefix.parent.parent
+        if prefix.parent.name == 'envs' and (parent in known or (parent / 'bin/micromamba').is_file()):
+            root(str(parent), 'environment registry')
+        elif prefix not in known:
+            external.append(str(prefix))
+    if len(registered) > 128:
+        unknown.append('Additional registry entries were not enumerated')
+    for path in dict.fromkeys([*map(Path, roots), home / 'micromamba', home / '.local/share/mamba', *map(Path, indices[:32])]):
+        try:
+            m.safety.plain_path(path)
+            if not path.is_dir():
+                continue
+            root(str(path), 'existing directory')
+            binary = path / 'bin/micromamba'
+            if os.path.lexists(binary):
+                exe(binary)
+                if str(binary) in executables:
+                    matched.setdefault(str(path), []).append(str(binary))
+        except (m.safety.SafetyError, OSError):
+            continue
+    # Probe only a fingerprinted active/known executable; HOME and config are isolated.
+    if (home / '.local/bin/micromamba').exists():
+        exe(home / '.local/bin/micromamba')
     for binary in executables:
         try:
-            info = runner([binary, 'info', '--json', '--no-rc'], env=dict(env), timeout=15)
-            if info.returncode == 0:
-                value = json.loads(info.stdout)
-                root(value.get('base environment') or value.get('root_prefix'), 'micromamba info: ' + binary)
+            with tempfile.TemporaryDirectory(prefix='science-inventory-') as temp:
+                probe = dict(PATH=os.defpath, HOME=temp, XDG_CONFIG_HOME=temp, XDG_CACHE_HOME=temp, XDG_DATA_HOME=temp, LC_ALL='C')
+                active = env.get('MAMBA_ROOT_PREFIX')
+                # Isolate even the root; report associations from corroborated local evidence.
+                result = runner([binary, 'info', '--json', '--no-rc', '-r', temp], env=probe, timeout=15)
+                value = json.loads(result.stdout) if result.returncode == 0 else {}
+                if value.get('base environment') == temp and binary == env.get('MAMBA_EXE') and active in roots:
+                    matched.setdefault(active, [])
+                    if binary not in matched[active]:
+                        matched[active].append(binary)
+                    root(active, 'micromamba info: ' + binary)
         except (OSError, ValueError, subprocess.SubprocessError):
-            pass
-    return {'roots': roots, 'executables': executables, 'bash_activation': 'mamba initialize' in text or 'shell hook' in text,
-            'prior': [r for r in roots if m.read_state(r).get('managed_by') == 'scientific-python-ubuntu']}
+            continue
+    details = {}
+    for name in roots:
+        path = Path(name)
+        row = {'executables': matched.get(name, []), 'environments': [], 'unknown': [], 'ownership': 'unverified'}
+        try:
+            m.safety.plain_path(path)
+            if not path.is_dir():
+                raise ValueError('Root is not a directory')
+            row['environments'] = ['base'] if (path / 'conda-meta/history').is_file() else []
+            children = m.safety.plain_path(path / 'envs', missing=True)
+            if children.is_dir():
+                with os.scandir(children) as scan:
+                    for i, item in enumerate(scan):
+                        if i == 128:
+                            row['unknown'].append('Additional envs entries were not enumerated'); break
+                        if item.is_dir(follow_symlinks=False) and not (Path(item.path) / 'conda-meta').is_symlink() and (Path(item.path) / 'conda-meta/history').is_file():
+                            row['environments'].append(item.name)
+                        else:
+                            row['unknown'].append(item.name)
+            if 'science' in row['environments'] and m.owned_science(path):
+                row['ownership'] = 'verified Science environment'
+        except (m.safety.SafetyError, m.InstallError, OSError, ValueError) as error:
+            row['unknown'].append(str(error))
+        details[name] = row
+    return {'roots': roots, 'executables': executables, 'unverified_executables': unverified, 'details': details,
+            'registered_external': [value for value in external if value not in roots], 'unknown': unknown,
+            'external_cache_settings': [name for name in ('CONDA_PKGS_DIRS', 'MAMBA_PKGS_DIRS', 'CONDARC', 'MAMBARC') if env.get(name)],
+            'bash_activation': 'mamba initialize' in text or 'shell hook' in text,
+            'prior': [name for name, row in details.items() if 'science' in row['environments']]}
 
 
 def verified_existing_binary(home, root, detection, config):
@@ -143,8 +237,9 @@ def verified_existing_binary(home, root, detection, config):
 def select(home=None, detection=None, reader=input, manage_science=True):
     home = Path(home) if home is not None else Path.home()
     detection = detect(home) if detection is None else detection
-    roots = detection['roots']; binaries = detection['executables']
-    default = '3' if roots or binaries else '1'
+    roots = detection['roots']
+    usable = {name: row['executables'] for name, row in detection['details'].items() if row['executables'] and Path(name).is_dir()}
+    default = '3' if usable else '1'
     print('''\n1 – Recommended: ~/micromamba
     Recommended for a new installation; easy to find and manage.
     Environments and package cache are kept together.
@@ -159,13 +254,16 @@ def select(home=None, detection=None, reader=input, manage_science=True):
     Paths and write permissions are checked; unmanaged files are never replaced.''')
     if detection['prior']:
         print('Previous Scientific Python root(s): ' + ', '.join(detection['prior']))
-        print('Recommendation: retain the previous root (Existing).')
+        if set(detection['prior']) & set(usable):
+            print('Recommendation: retain the previous root (Existing).')
+        else:
+            print('Those roots do not have a verified executable association. Inspect Info before retrying.')
     choice = ask('Micromamba layout [{}]: '.format(default), default, reader)
     if choice not in ['1', '2', '3', '4']: raise m.InstallError('Invalid layout selection.')
     mode = {'1': 'Recommended', '2': 'XDG', '3': 'Existing', '4': 'Custom'}[choice]
     if choice == '3':
-        if not binaries: raise m.InstallError('No existing Micromamba executable found; select a new layout.')
-        candidates = list(roots)
+        if not usable: raise m.InstallError('No verified root/executable pair found. See Info for unverified candidates; do not overwrite an existing environment.')
+        candidates = list(usable)
         if len(candidates) > 1:
             print('Conflicting/different roots were detected. Select explicitly:')
             for i, value in enumerate(candidates, 1): print(' {}: {} ({})'.format(i, value, ', '.join(roots[value])))
@@ -178,9 +276,14 @@ def select(home=None, detection=None, reader=input, manage_science=True):
         if not answer: raise m.InstallError('No root selected.')
         root = expand_path(answer, home)
         m.guard_root(root, home, existing=True)
+        binaries = usable.get(str(root))
+        if not binaries:
+            raise m.InstallError('The selected root has no verified executable association. No changes made.')
         config = m.release()
         try:
             mm = verified_existing_binary(home, root, detection, config)
+            if str(mm) not in binaries:
+                raise m.InstallError('The active binary does not match this root.')
         except (m.InstallError, OSError, ValueError, subprocess.SubprocessError) as error:
             print('Automatic selection unavailable: ' + str(error))
             if len(binaries) > 1:
@@ -201,6 +304,88 @@ def select(home=None, detection=None, reader=input, manage_science=True):
         mm = root / 'bin/micromamba'
     if manage_science: m.guard_science(root)
     return mode, root, mm
+
+
+def select_inventory_root(detection, env=None, reader=input, removal=False, total=False):
+    env = os.environ if env is None else env
+    if removal and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise m.InstallError('Removal selection requires an interactive terminal.')
+    details = detection['details']
+    roots = [name for name in details if Path(name).is_dir()]
+    if not roots:
+        raise m.InstallError('No existing Micromamba root was identified.')
+    science = [name for name in roots if details[name]['ownership'] == 'verified Science environment']
+    active = [name for name in science if env.get('CONDA_PREFIX') == str(Path(name) / 'envs/science')]
+    default = active[0] if len(active) == 1 else (science[0] if len(science) == 1 and len(detection['prior']) == 1 else None)
+    print('Micromamba inventory (bounded; externally registered: {}):'.format(', '.join(detection['registered_external']) or 'none found'))
+    for number, name in enumerate(roots, 1):
+        row = details[name]
+        print('[{}] {}: {}; environments: {}; unknown: {}'.format(number, name, row['ownership'],
+              ', '.join(row['environments']) or 'none found', ', '.join(row['unknown']) or 'none found'))
+    print('[0] Cancel')
+    key = str(roots.index(default) + 1) if default is not None else None
+    answer = ask('Select root [{}]: '.format(key or 'no default'), key, reader)
+    if answer in (None, '0'):
+        return None, None
+    if not answer.isascii() or not answer.isdecimal() or len(answer) > 3 or not 1 <= int(answer) <= len(roots):
+        raise m.InstallError('Invalid inventory selection.')
+    name = roots[int(answer) - 1]
+    root = Path(name)
+    if str(root.resolve()) != name:
+        raise m.InstallError('Root is redirected or noncanonical. No changes made.')
+    if removal and not total and name != default and reader('Type the exact selected root {}: '.format(name)) != name:
+        raise m.InstallError('The root path did not match exactly. No changes made.')
+    binaries = details[name]['executables']
+    mm = Path(env['MAMBA_EXE']) if env.get('MAMBA_EXE') in binaries else (Path(binaries[0]) if len(binaries) == 1 else None)
+    return (root, mm, name == default) if total else (root, mm)
+
+
+def confirm_total_removal(root, is_default, reader=input, output=print):
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise m.InstallError('Total Remove requires interactive terminal input and output.')
+    phrase = 'Yes, I do understand.'
+    try:
+        if not is_default and reader('Type the exact selected root {}: '.format(root)) != str(root):
+            return False
+        output('FIRST CONFIRMATION: {} and all listed contents will be permanently removed.'.format(root))
+        if reader('Type exactly "{}": '.format(phrase)) != phrase:
+            return False
+        output('FINAL CONFIRMATION: removal of {} cannot be undone.'.format(root))
+        return reader('Type again exactly "{}": '.format(phrase)) == phrase
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
+def total_remove_action(root, home, detected, is_default):
+    plan = m.total_removal_plan(root, home, detected)
+    print('DELETE the whole directory: ' + str(root))
+    print('Includes: verified Science environment, root executable, private package cache and installer files.')
+    for launcher in plan['launchers']:
+        print('DELETE owned launcher: ' + launcher['path'])
+    if plan['registry'] and plan['registry']['original'] != plan['registry']['new']:
+        print('REMOVE only registrations for this root and its Science prefix: ' + plan['registry']['path'])
+    print('PRESERVE: other roots, external environments and caches, shared Bash settings, Spyder settings and package configuration.')
+    if not confirm_total_removal(root, is_default):
+        print('Cancelled. Nothing was removed.')
+        return 0
+    print('Removed targets: ' + json.dumps(m.apply_total_removal(root, home, plan, lambda: detect(home))))
+    return 0
+
+
+def review_migration(root, home, reader=input):
+    prefix = root / 'envs/science'
+    if not prefix.exists() or m.owned_science(root):
+        return None
+    try:
+        evidence = m.migration_evidence(root, home)
+    except (m.InstallError, m.safety.SafetyError, OSError, ValueError) as error:
+        raise m.InstallError('Cannot verify legacy Science: {}. The environment was preserved. Compare the original installer state, launcher, configuration and Conda history with a trusted backup. If these cannot be recovered, choose a separate new root and leave {} intact.'.format(error, prefix)) from error
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise m.InstallError('Legacy migration requires an interactive terminal. No changes made.')
+    print('Verified legacy Science evidence: {} at {}. This migration allows an update; it does not authorize root, cache or environment removal.'.format(evidence['format'], prefix))
+    if ask('Approve environment ownership metadata migration? [y/N]: ', 'n', reader).lower() not in ('y', 'yes'):
+        raise PreparationPending('Legacy migration declined. The existing environment was preserved.')
+    return evidence
 
 
 def check_micromamba(mm, root, config, runner=m.run_process, require_contract=True):
@@ -414,6 +599,7 @@ class Tee:
     def __init__(self, terminal, log): self.terminal, self.log = terminal, log
     def write(self, value): self.terminal.write(value); self.log.write(value); self.log.flush()
     def flush(self): self.terminal.flush(); self.log.flush()
+    def isatty(self): return self.terminal.isatty()
 
 
 def diagnostics(root, mm, output, home=None, launcher=None):
@@ -435,11 +621,71 @@ def diagnostics(root, mm, output, home=None, launcher=None):
     return report
 
 
-def logged_runner(argv, **kwargs):
+def run_package_process(argv, env=None, timeout=1800, output=print, interval=5, capture_limit=64 * 1024 * 1024):
+    """Drain both streams with bounded buffers while the native child runs."""
+    start = time.monotonic()
+    process = subprocess.Popen([str(arg) for arg in argv], env=env, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    streams = [bytearray(), bytearray()]; overflow = [False, False]; errors = []
+
+    def drain(source, index):
+        try:
+            with source:
+                for part in iter(lambda: source.read1(65536), b''):
+                    remaining = capture_limit - len(streams[index])
+                    streams[index].extend(part[:remaining])
+                    overflow[index] |= len(part) > remaining
+        except OSError as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=drain, args=(pipe, index), daemon=True)
+               for index, pipe in enumerate((process.stdout, process.stderr))]
+    for thread in threads:
+        thread.start()
+    try:
+        while True:
+            elapsed = time.monotonic() - start
+            if elapsed >= timeout:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            try:
+                process.wait(timeout=min(interval, timeout - elapsed))
+                break
+            except subprocess.TimeoutExpired:
+                if process.poll() is None and time.monotonic() - start < timeout:
+                    elapsed = round(time.monotonic() - start)
+                    output('[6/9] Installing packages  RUNNING  Elapsed: {:02}:{:02}  Micromamba process: ACTIVE'.format(*divmod(elapsed, 60)), flush=True)
+        for thread in threads:
+            thread.join(max(0, min(5, timeout - (time.monotonic() - start))))
+        if any(thread.is_alive() for thread in threads) or errors:
+            raise m.InstallError('Micromamba output did not close cleanly; transaction result cannot be verified.')
+    except BaseException:
+        if os.name == 'posix':
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
+        elif process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill(); process.wait()
+        if os.name == 'posix':
+            # The leader can exit before its post-link children.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+        raise
+    out, err = [value.decode('utf-8', 'replace') for value in streams]
+    if any(overflow):
+        # Retain the native exit code and error. Do not accept partial JSON.
+        err += '\nCapture limit exceeded; native exit {}. Transaction output cannot be verified.\n'.format(process.returncode)
+        return subprocess.CompletedProcess(argv, process.returncode or 1, '', err)
+    return subprocess.CompletedProcess(argv, process.returncode, out, err)
+
+
+def logged_runner(argv, package_progress=False, **kwargs):
     logfile = getattr(sys.stdout, 'log', None)
     if logfile:
         logfile.write('\nPROCESS: ' + repr([str(a) for a in argv]) + '\n'); logfile.flush()
-    value = m.run_process(argv, **kwargs)
+    value = (run_package_process if package_progress else m.run_process)(argv, **kwargs)
     if logfile:
         logfile.write('EXIT: ' + str(value.returncode) + '\nSTDOUT:\n' + value.stdout + '\nSTDERR:\n' + value.stderr + '\n'); logfile.flush()
     return value
@@ -527,34 +773,62 @@ def select_optional_packages(reader=None, output=print):
     if selection == 'remove':
         output('PyTorch is no longer requested. Installed packages were preserved.')
         return False
-    output('Configured PyTorch backend: ' + selection.upper())
-    output('Continuing to Install/update for the package transaction review.')
+    output('PyTorch ' + selection.upper() + ' selected.')
+    output('Installation/update will follow now; no second menu selection is needed. Proposed package changes require separate approval.')
     return True
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', nargs='?', default='install', choices=['install', 'optional', 'validate', 'diagnostics', 'remove-science', 'remove-root', 'remove-settings', 'info'])
+    parser.add_argument('action', nargs='?', default='install', choices=['install', 'optional', 'validate', 'diagnostics', 'remove-science', 'remove-root', 'remove-settings', 'remove-total', 'info'])
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     m.verify_bundle()
     home = Path.home(); config = m.release()
+    detected = detect(home)
     if args.action == 'info':
-        detected = detect(home)
         print('Scientific Python Ubuntu V4-r5.2; Ubuntu 24.04/26.04 x86-64')
         print('Default new root: ' + str(home / 'micromamba'))
         print('Science path: <selected root>/envs/science')
         print('Detected roots: ' + json.dumps(detected['roots']))
         print('Detected executable(s): ' + json.dumps(detected['executables']))
         print('Bash activation detected: ' + str(detected['bash_activation']))
+        print('Bounded inventory: ' + json.dumps({key: detected[key] for key in ('details', 'unverified_executables', 'registered_external', 'external_cache_settings', 'unknown')}))
         return 0
     if args.action != 'diagnostics': m.platform_guard()
     if args.action == 'optional' and not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise m.InstallError('Optional package selection requires an interactive terminal.')
     step(1, 'PASS')
-    mode, root, mm = select(home, manage_science=args.action not in ['diagnostics', 'validate', 'remove-settings', 'remove-science', 'remove-root']); step(2, 'PASS')
+    if args.action == 'remove-total':
+        selection = select_inventory_root(detected, removal=True, total=True)
+        return total_remove_action(selection[0], home, detected, selection[2]) if selection[0] else 0
+    if args.action == 'diagnostics' or args.action.startswith('remove-'):
+        root, mm = select_inventory_root(detected, removal=args.action.startswith('remove-'))
+        if root is None:
+            return 0
+        if mm is None and args.action in ('remove-science', 'diagnostics'):
+            if args.action == 'remove-science':
+                raise m.InstallError('Science removal requires a verified Micromamba executable association.')
+            output = args.output or Path.cwd() / 'science-diagnostics.json'
+            m.write_json(output, {'inventory': detected, 'selected_root': str(root), 'runtime': 'SKIPPED: executable association unverified'})
+            print('Inventory collected without executing an unverified binary: ' + str(output))
+            return 0
+        mode = 'Existing'
+    else:
+        mode, root, mm = select(home, detection=detected, manage_science=False)
+    step(2, 'PASS')
+    print('Root: {}\nMicromamba executable: {}'.format(root, mm or 'unverified'))
+    migration = review_migration(root, home) if args.action in ('install', 'optional') else None
     if args.action in ['install', 'optional', 'validate']:
         try:
+            interactive = sys.stdin.isatty() and sys.stdout.isatty()
+            if args.action != 'validate' and interactive and not (root / 'envs/science').exists():
+                m.science_config.review_new_root_configuration(BUNDLE, root, detected['prior'])
+            if migration and migration['format'] == 'ubuntu-lts-v3' and not m.science_config.active_path().exists():
+                print('V3 had no saved configuration file. Use the verified archived requests with the current release constraints?')
+                if ask('Approve recovery of the V3 package configuration? [y/N]: ', 'n').lower() not in ('y', 'yes'):
+                    raise PreparationPending('V3 configuration recovery declined. No environment changes made.')
+                m.science_config.recover_v3(BUNDLE, root, m.LEGACY_V3_SPECS, m.history_specs(root / 'envs/science'))
             m.science_config.initialize(BUNDLE, root=root)
             if args.action == 'install':
                 m.science_config.offer_release_packages(BUNDLE,interactive=sys.stdin.isatty() and sys.stdout.isatty())
@@ -569,7 +843,9 @@ def main():
             raise m.InstallError(str(exc)) from exc
     if args.action == 'diagnostics':
         output = args.output or Path.cwd() / 'science-diagnostics.json'
-        diagnostics(root, mm, output, home)
+        report = diagnostics(root, mm, output, home)
+        report['inventory'] = detected
+        m.write_json(output, report)
         print('Diagnostic collection: SUCCESS. Runtime findings are reported independently.\nReport: ' + str(output)); return 0
     if args.action == 'remove-science':
         return remove_action(root, mm, home)
@@ -628,12 +904,16 @@ def main():
                 print('Micromamba ' + actual + ' compatible; executable preserved.'); step(3, 'PASS')
                 current_step = 4; step(4, 'RUNNING')
                 if not recheck_usage(root / 'envs/science', 'updated'): raise m.UsageBlocked(m.processes.inspect(root / 'envs/science'), 'updated')
+                if migration is not None:
+                    m.write_migration_receipt(root, home, mm, migration)
                 def progress(number, status):
                     nonlocal current_step
                     current_step = number
                     step(number, status)
                 before_others = m.lifecycle.other_environments(root)
-                changed = m.sync(root, config, runner=logged_runner, mm=mm, existing=mode == 'Existing', progress=progress)
+                def package_runner(argv, **kwargs):
+                    return logged_runner(argv, package_progress=current_step == 6, **kwargs)
+                changed = m.sync(root, config, runner=package_runner, mm=mm, existing=mode == 'Existing', progress=progress)
                 package_status = 'SUCCESS' if changed else 'Already up to date'
                 if not changed: print('Operation: Already up to date (package transaction skipped).')
                 previous = m.read_state(root)
@@ -662,8 +942,13 @@ def main():
                 existing = read_index(home)
                 if str(root) not in existing: m.write_json(index_file(home), existing + [str(root)])
             current_step = 9; diagnostics(root, mm, report_path, home, launchers)
+            if args.action != 'validate' and package_status == 'SUCCESS' and not os.path.lexists(root / m.DEDICATED_ROOT_RECEIPT):
+                try:
+                    m.seal_dedicated_root(root)
+                except (m.InstallError, m.safety.SafetyError, OSError, ValueError) as error:
+                    print('Total Remove unavailable for this root: ' + str(error))
             step(9, 'PASS'); result = 'SUCCESS'
-        except (m.InstallError, OSError, ValueError, subprocess.SubprocessError, EOFError, KeyboardInterrupt) as exc:
+        except (m.InstallError, m.safety.SafetyError, OSError, ValueError, subprocess.SubprocessError, EOFError, KeyboardInterrupt) as exc:
             result = 'PENDING' if isinstance(exc, PreparationPending) else 'BLOCKED' if isinstance(exc, (m.UsageBlocked, m.OperationBlocked)) else 'FAIL'
             step(current_step, result); print('ERROR: ' + str(exc), file=sys.stderr)
             file = root / 'science-runtime.json'
@@ -680,5 +965,5 @@ def main():
 
 if __name__ == '__main__':
     try: sys.exit(main())
-    except (m.InstallError, OSError, ValueError, subprocess.SubprocessError, EOFError, KeyboardInterrupt) as exc:
+    except (m.InstallError, m.safety.SafetyError, OSError, ValueError, subprocess.SubprocessError, EOFError, KeyboardInterrupt) as exc:
         print('ERROR: ' + str(exc), file=sys.stderr); sys.exit(1)

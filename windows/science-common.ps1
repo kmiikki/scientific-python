@@ -239,6 +239,68 @@ function Get-ScienceLayoutStatuses {
     )
 }
 
+function Get-ScienceMicromambaInventory {
+    param([string]$ExpectedSha256)
+    $layouts=@(Get-ScienceLayoutStatuses)
+    foreach($status in $layouts){
+        if(-not $status.HasFootprint){continue}
+        $layout=$status.Layout
+        $environments=@();$unknown=@();$verified=$false
+        try {
+            foreach($directory in @($layout.Root,$layout.Envs)){
+                $current=[IO.DirectoryInfo]::new($directory)
+                while($current){
+                    if($current.Exists -and ($current.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Redirected inventory directory.'}
+                    $current=$current.Parent
+                }
+            }
+            if(Test-Path -LiteralPath (Join-Path $layout.Root 'conda-meta/history') -PathType Leaf){$environments+=,'base'}
+            if(Test-Path -LiteralPath $layout.Envs -PathType Container){
+                $entries=@(Get-ChildItem -LiteralPath $layout.Envs -Force -ErrorAction Stop|Select-Object -First 129)
+                if($entries.Count -gt 128){$unknown+=,'More than 128 environment entries'}
+                foreach($entry in @($entries|Select-Object -First 128)){
+                    $history=Join-Path $entry.FullName 'conda-meta/history'
+                    try {
+                        Assert-ScienceRegularPath $history
+                        if($entry.PSIsContainer -and (Test-Path -LiteralPath $history -PathType Leaf)){$environments+=,$entry.Name}
+                        else{$unknown+=,$entry.Name}
+                    } catch {$unknown+=,$entry.Name}
+                }
+            }
+            if($status.MicromambaExists -and $ExpectedSha256){
+                Assert-ScienceRegularPath $layout.Micromamba
+                $verified=(Get-FileHash -LiteralPath $layout.Micromamba -Algorithm SHA256 -ErrorAction Stop).Hash -ieq $ExpectedSha256
+            }
+        } catch {$unknown+=,'Inaccessible or redirected installer path'}
+        [pscustomobject]@{Mode=$status.Mode;Root=$layout.Root;Layout=$layout;VerifiedExecutable=$verified;Environments=$environments;Unknown=$unknown}
+    }
+}
+
+function Select-ScienceRemovalRoot {
+    param([string]$ExpectedSha256,[switch]$ScienceOnly)
+    if(-not (Test-ScienceInteractiveConfiguration)){throw 'Removal selection requires an interactive console.'}
+    $rows=@(Get-ScienceMicromambaInventory $ExpectedSha256)
+    if($ScienceOnly){$rows=@($rows|Where-Object {$_.Environments -contains 'science'})}
+    if(-not $rows.Count){Write-Host 'No supported removal root was found.';return $null}
+    $science=@($rows|Where-Object {$_.VerifiedExecutable -and $_.Environments -contains 'science'})
+    $active=@($science|Where-Object {$env:CONDA_PREFIX -ieq $_.Layout.Science})
+    $default=if($active.Count -eq 1){$active[0]}elseif($science.Count -eq 1 -and @($rows|Where-Object {$_.Environments -contains 'science'}).Count -eq 1){$science[0]}
+    $number=0
+    for($i=0;$i -lt $rows.Count;$i++){
+        $row=$rows[$i]
+        Write-Host ('[{0}] {1} (executable verified: {2}; envs: {3})' -f ($i+1),$row.Root,$row.VerifiedExecutable,($row.Environments -join ', '))
+        if($default -and $row.Root -ceq $default.Root){$number=$i+1}
+    }
+    Write-Host '[0] Cancel'
+    $answer=(Read-Host "Select removal root [$number]").Trim()
+    if(-not $answer){$answer=[string]$number}
+    if($answer -eq '0'){return $null}
+    if($answer -notmatch '^[1-9][0-9]?$' -or [int]$answer -gt $rows.Count){throw 'Invalid root selection.'}
+    $selected=$rows[([int]$answer)-1]
+    if([int]$answer -ne $number -and (Read-Host "Type the exact root path $($selected.Root)") -cne $selected.Root){throw 'Root path did not match exactly; no removal was started.'}
+    return $selected.Layout
+}
+
 function Select-ScienceInstallLayout {
     param(
         [ValidateSet('Auto', 'Home', 'Safe')]

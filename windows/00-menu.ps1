@@ -134,13 +134,10 @@ function Show-Info {
     Write-Host '5  Remove science environment'
     Write-Host '   Removes the complete science environment. This also removes Spyder'
     Write-Host '   and all Python packages installed inside science. Micromamba is kept.'
-    Write-Host '   A supported Home/Safe science environment can be removed even when'
-    Write-Host '   it was created manually and has no installer state file.'
+    Write-Host '   Requires verified installer ownership and separate removal approval.'
     Write-Host ''
-    Write-Host '6  Remove micromamba'
-    Write-Host '   Removes the selected supported Home/Safe micromamba infrastructure.'
-    Write-Host '   It refuses to run while science or another environment in that root'
-    Write-Host '   still exists. Other Python/Conda/Mamba installations are not removed.'
+    Write-Host '6  Whole-root Micromamba removal status (unavailable on Windows)'
+    Write-Host '   Whole-root removal is blocked until Windows ownership and cache exclusivity can be verified.'
     Write-Host ''
 
     Write-Host 'Supported layout status'
@@ -243,14 +240,14 @@ while ($true) {
     Write-Host 'Choose an action:'
     Write-Host ''
     Write-Host '  1  Install/update Scientific Python'
-    Write-Host '  O  Optional packages'
+    Write-Host '  O  Configure optional packages and install/update'
     Write-Host ''
     Write-Host '  2  Apply/repair the OpenCL patch'
     Write-Host '  3  Show OpenCL patch status'
     Write-Host ''
     Write-Host '  4  Remove Spyder user settings'
     Write-Host '  5  Remove the science environment'
-    Write-Host '  6  Remove micromamba'
+    Write-Host '  6  Whole-root Micromamba removal status (unavailable on Windows)'
     Write-Host ''
     Write-Host '  D  Diagnostics (redacted)'
     Write-Host '  I  Info'
@@ -280,10 +277,12 @@ while ($true) {
             Write-Host ''
             Write-Host "Selected mode : $($layout.Mode)"
             Write-Host "Selected root : $($layout.Root)"
+            Write-Host "Micromamba    : $($layout.Micromamba)"
             Show-OtherInstallationSummary
 
             try {
                 # Preserve uncertain legacy installations before preparation changes Windows settings.
+                Show-ScienceNewRootConfiguration $layout
                 $null=Initialize-ScienceConfiguration -Root $layout.Root
                 if($optional -and -not (Select-ScienceOptionalPackages)){
                     Pause-Menu
@@ -349,7 +348,10 @@ while ($true) {
         }
 
         '^5$' {
-            [void](Invoke-Step '04-remove-science.ps1' "-Mode 'Auto'")
+            try {
+                $target=Select-ScienceRemovalRoot $ScienceRelease.MicromambaSha256 -ScienceOnly
+                if($target){[void](Invoke-Step '04-remove-science.ps1' "-Mode '$($target.Mode)'")}
+            } catch {Write-Host $_.Exception.Message -ForegroundColor Yellow}
             Pause-Menu
             continue
         }

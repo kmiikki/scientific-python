@@ -97,7 +97,7 @@ def mount_points():
     return result
 
 
-def tree_plan(target):
+def tree_plan(target, dedicated=False):
     target=plain_path(target)
     if not target.is_dir(): raise SafetyError('Removal target must be a directory.')
     if not getattr(shutil.rmtree,'avoids_symlink_attacks',False):
@@ -105,11 +105,13 @@ def tree_plan(target):
     for point in mount_points():
         if point==target or point.is_relative_to(target): raise SafetyError('Mounted directory inside removal target: '+str(point))
     info=target.stat(); snapshot={}
+    if dedicated and (info.st_uid != os.getuid() or info.st_mode & 0o022):
+        raise SafetyError('The dedicated root is not exclusively under the current user.')
     def failure(error): raise error
     for directory, dirs, files in os.walk(target,followlinks=False,onerror=failure):
         directory=Path(directory)
         # Nested Python/Conda environments are independent data, even under science.
-        if directory!=target and ('pyvenv.cfg' in files or 'conda-meta' in dirs):
+        if directory!=target and ('pyvenv.cfg' in files or 'conda-meta' in dirs) and not (dedicated and directory==target/'envs/science'):
             raise SafetyError('Nested Python/Conda environment must be preserved: '+str(directory))
         for name in dirs+files:
             path=directory/name; entry=path.lstat()
@@ -117,20 +119,64 @@ def tree_plan(target):
                 raise SafetyError('Special file inside removal target: '+str(path))
             if stat.S_ISDIR(entry.st_mode) and entry.st_dev!=info.st_dev:
                 raise SafetyError('Filesystem boundary inside removal target.')
+            if dedicated:
+                if len(snapshot) >= 750000:
+                    raise SafetyError('Dedicated root inventory exceeded the entry limit.')
+                if entry.st_uid != os.getuid() or (stat.S_ISDIR(entry.st_mode) and entry.st_mode & 0o022):
+                    raise SafetyError('Foreign ownership or unsafe directory permissions: '+str(path))
+                if stat.S_ISLNK(entry.st_mode) and not path.resolve().is_relative_to(target):
+                    raise SafetyError('Link leaves the dedicated root: '+str(path))
             snapshot[str(path.relative_to(target))]=(entry.st_dev,entry.st_ino,entry.st_mode,entry.st_size,entry.st_mtime_ns)
-    return {'target':str(target),'identity':(info.st_dev,info.st_ino),'entries':snapshot}
+    return {'target':str(target),'identity':(info.st_dev,info.st_ino),'entries':snapshot,'dedicated':dedicated}
 
 
 def remove_tree(plan):
     target=Path(plan['target'])
-    if tree_plan(target)!=plan: raise SafetyError('Removal tree changed during review; retry without concurrent writers.')
+    if tree_plan(target,dedicated=plan.get('dedicated',False))!=plan: raise SafetyError('Removal tree changed during review; retry without concurrent writers.')
     with directory_fd(target.parent) as parent:
         info=os.stat(target.name,dir_fd=parent,follow_symlinks=False)
         if (info.st_dev,info.st_ino)!=tuple(plan['identity']) or not stat.S_ISDIR(info.st_mode):
             raise SafetyError('Removal directory identity changed.')
+        if plan.get('dedicated'):
+            remove_dedicated_entries(parent, target.name, plan)
+            return
         # rmtree's fd implementation unlinks leaf symlinks and hardlinks. It does
         # not follow them, chmod shared files, run unlink scripts or clean caches.
         shutil.rmtree(target.name,dir_fd=parent)
+
+
+def remove_dedicated_entries(parent, name, plan):
+    """Never recursively remove files absent from the approved dedicated tree."""
+    children = {}
+    for key, expected in plan['entries'].items():
+        relative = Path(key)
+        children.setdefault(relative.parent, {})[relative.name] = expected
+
+    def remove_directory(anchor, basename, relative, identity):
+        fd = os.open(basename, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=anchor)
+        try:
+            st = os.fstat(fd)
+            if (st.st_dev, st.st_ino) != tuple(identity):
+                raise SafetyError('Directory replaced during deletion: ' + str(relative))
+            expected_names = children.get(relative, {})
+            if set(os.listdir(fd)) != set(expected_names):
+                raise SafetyError('Unapproved directory entry found during deletion: ' + str(relative))
+            for child, expected in expected_names.items():
+                item = os.stat(child, dir_fd=fd, follow_symlinks=False)
+                if (item.st_dev, item.st_ino, item.st_mode, item.st_size, item.st_mtime_ns) != tuple(expected):
+                    raise SafetyError('Entry changed during deletion: ' + str(relative / child))
+                if stat.S_ISDIR(item.st_mode):
+                    remove_directory(fd, child, relative / child, expected[:2])
+                else:
+                    os.unlink(child, dir_fd=fd)
+            st = os.stat(basename, dir_fd=anchor, follow_symlinks=False)
+            if not stat.S_ISDIR(st.st_mode) or (st.st_dev, st.st_ino) != tuple(identity):
+                raise SafetyError('Directory replaced during deletion: ' + str(relative))
+            os.rmdir(basename, dir_fd=anchor)  # Refuses an entry added after enumeration.
+        finally:
+            os.close(fd)
+
+    remove_directory(parent, name, Path('.'), plan['identity'])
 
 
 def registry_plan(home, prefix=None, required=False):

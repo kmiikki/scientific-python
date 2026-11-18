@@ -242,6 +242,43 @@ function Test-ScienceInteractiveConfiguration {
     }
     try {return -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected} catch {return $false}
 }
+function Show-ScienceNewRootConfiguration {
+    param($Layout,[string]$Path=(Get-ScienceConfigurationPath))
+    if(Test-Path -LiteralPath $Layout.Science){return}
+    if(-not (Test-Path -LiteralPath $Path)){
+        Write-Host 'The new root will start with release defaults if no legacy configuration is found. Release defaults do not request PyTorch.'
+        return
+    }
+    Assert-ScienceRegularPath $Path
+    $original=[IO.File]::ReadAllBytes($Path)
+    $saved=Read-ScienceJson $Path
+    if(@($saved.PSObject.Properties.Name) -cnotcontains 'SchemaVersion'){
+        Write-Host 'The new root would use the existing saved legacy configuration. Review its migration before changing package requests.'
+        return
+    }
+    $null=Assert-ScienceConfiguration $saved
+    $default=Get-ScienceDefaultConfiguration
+    Write-Host "The new root would use saved package requests from $Path"
+    Write-Host ('Saved PyTorch choice: '+(Get-SciencePyTorchBackend @($saved.ScientificPackages)).ToUpperInvariant())
+    if((($saved.Channels -join '|') -ceq ($default.Channels -join '|')) -and (($saved.ScientificPackages -join '|') -ceq ($default.ScientificPackages -join '|'))){return}
+    $origin=Get-ScienceConfigurationOrigins $Path $Layout.Root
+    if(@($origin.Value.Roots|Where-Object {$_ -ine $origin.Key}).Count -or @(Get-ScienceLayoutStatuses | Where-Object {$_.Layout.Root -ine $Layout.Root -and $_.ScienceExists}).Count){
+        Write-Host 'Reset unavailable because another installation may use this configuration. The saved requests are preserved.'
+        return
+    }
+    if(-not (Test-ScienceInteractiveConfiguration)){return}
+    if((Read-Host 'Reset saved requests to release defaults (no PyTorch)? [y/N]').Trim() -notmatch '^(?i:y|yes)$'){return}
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{$hash=[BitConverter]::ToString($sha.ComputeHash($original)).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+    $backup=Join-Path (Split-Path -Parent $Path) ('science-release.pre-reset-'+$hash+'.json')
+    if(Test-Path -LiteralPath $backup){
+        Assert-ScienceRegularPath $backup
+        if([Convert]::ToBase64String([IO.File]::ReadAllBytes($backup)) -cne [Convert]::ToBase64String($original)){throw 'Configuration backup collision.'}
+    }else{Set-ScienceConfigBytes $backup $original}
+    $text=($default|ConvertTo-Json -Depth 32)+"`n"
+    Set-ScienceConfigBytes $Path ((New-Object Text.UTF8Encoding($false)).GetBytes($text)) -ExpectedBytes $original
+    Write-Host "Previous configuration saved to $backup"
+}
 function Get-ScienceMissingReleasePackages {
     param($Configuration)
     $null=Assert-ScienceConfiguration $Configuration
@@ -406,7 +443,7 @@ function Select-ScienceOptionalPackages {
         Write-Host 'PyTorch is no longer requested. Installed packages were preserved.'
         return $false
     }
-    Write-Host ('Configured PyTorch backend: '+$selected.ToUpperInvariant())
-    Write-Host 'Continuing to Install/update for the package transaction review.'
+    Write-Host ('PyTorch '+$selected.ToUpperInvariant()+' selected.')
+    Write-Host 'Installation/update will follow now; no second menu selection is needed. Proposed package changes require separate approval.'
     return $true
 }

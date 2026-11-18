@@ -107,6 +107,30 @@ try {
         Reject {Set-SciencePyTorchRequest -Choice cpu -ExpectedBytes ([byte[]]@(1,2,3))} 'changed during review'
         Check ((Get-ScienceFileSha256 $path) -ceq $before) 'Pinned or stale requests were overwritten.'
     }
+    Case 'new-root-reset-preserves-shared-config-and-backs-up-on-explicit-reset' {
+        $target=Join-Path $work 'new-reset-root'
+        $old=Join-Path $work 'other-config-root'
+        $layout=[pscustomobject]@{Root=$target;Science=(Join-Path $target 'envs/science')}
+        $value=Read-ScienceJson $path
+        $value.ScientificPackages+=@("pytorch[build='cpu*']")
+        Put-Json $path $value
+        $before=Get-ScienceFileSha256 $path
+        function Get-ScienceLayoutStatuses {return @()}
+        Set-ScienceConfigurationOrigin $path $old
+        $receipt=(Get-ScienceConfigurationOrigins $path $target).Path
+        Answers @()
+        Show-ScienceNewRootConfiguration $layout $path
+        Check ((Get-ScienceFileSha256 $path) -ceq $before) 'A configuration used by another root was reset.'
+        Remove-Item -LiteralPath $receipt
+        Answers @('')
+        Show-ScienceNewRootConfiguration $layout $path
+        Check ((Get-ScienceFileSha256 $path) -ceq $before) 'Default answer did not preserve the saved configuration.'
+        Answers @('yes')
+        Show-ScienceNewRootConfiguration $layout $path
+        Check ((Get-SciencePyTorchBackend (Read-ScienceJson $path).ScientificPackages) -ceq 'none') 'Reset did not remove saved optional requests.'
+        $backup=Join-Path (Split-Path -Parent $path) "science-release.pre-reset-$before.json"
+        Check ((Get-ScienceFileSha256 $backup) -ceq $before) 'Reset backup did not preserve exact bytes.'
+    }
     Case 'normal-menu-dispatches-cpu-to-install-and-removal-back-to-menu' {
         $menu=Join-Path $root 'windows/00-menu.ps1'
         $tokens=$null;$errors=$null
@@ -116,6 +140,7 @@ try {
         $stepper=[scriptblock]::Create('foreach($iteration in @(1)) {'+[Environment]::NewLine+$dispatch.Extent.Text+[Environment]::NewLine+'}')
         function Select-ScienceInstallLayout {return [pscustomobject]@{Mode='Home';Root=(Join-Path $work 'mamba')}}
         function Initialize-ScienceConfiguration {}
+        function Show-ScienceNewRootConfiguration {}
         function Show-OtherInstallationSummary {}
         function Pause-Menu {}
         function Invoke-Step {

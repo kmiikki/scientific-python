@@ -42,7 +42,8 @@ class OptionalPackageTests(unittest.TestCase):
         install, output = self.menu('1')
         self.assertTrue(install)
         self.assertIn('Configured PyTorch backend: NONE', output)
-        self.assertIn('Configured PyTorch backend: CPU', output)
+        self.assertIn('PyTorch CPU selected.', output)
+        self.assertIn('Proposed package changes require separate approval.', output)
         self.assertEqual(config.read_json(self.path)['ScientificPackages'],
                          self.defaults['ScientificPackages'] + ["pytorch[build='cpu*']"])
         backup, = self.path.parent.glob('science-release.optional-*.json')

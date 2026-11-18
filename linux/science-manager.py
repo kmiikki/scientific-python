@@ -302,6 +302,107 @@ def verify_legacy_science(root, prefix, receipt):
         raise InstallError('Legacy installed packages disagree with the completed installer state.')
 
 
+LEGACY_V3_LAUNCHER = 'f39fd7cfbfaedde52a725eb883983ac99e091c94d77da89e8a9e63ea40884ba7'
+LEGACY_V3_BINARY_HASHES = frozenset({
+    '9689782d863c05a1bf5d2d371ba527104e7a4eb4310c1637d8653b751aed9c82',
+    '77b7790ec97f64581118f103585b175df4306f95829b0fa6bfe4a19cc88a1182',
+})
+LEGACY_V3_SPECS = tuple('''python=3.14 apache-arrow-proc=*=cpu numpy scipy pandas matplotlib seaborn
+    sympy statsmodels scikit-learn scikit-image opencv pillow imageio xarray h5py netcdf4 pyarrow
+    openpyxl xlsxwriter jupyterlab ipykernel ipython spyder=6.1.7 numba tqdm pint uncertainties pyserial pip'''.split())
+
+
+def check_legacy_directory(directory):
+    safety.plain_path(directory)
+    st = directory.lstat()
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
+        raise InstallError('Legacy directory ownership or permissions are ambiguous: ' + str(directory))
+
+
+def migration_evidence(root, home):
+    """Read evidence only. Missing or inconsistent evidence never implies ownership."""
+    root, home = Path(root), Path(home)
+    prefix = root / 'envs/science'
+    for directory in (root, root / 'envs', prefix, prefix / 'conda-meta'):
+        check_legacy_directory(directory)
+    state_bytes = ownership_file(root / '.scientific-python-installer-state')
+    pairs = [line.split('=', 1) for line in state_bytes.decode().splitlines()]
+    if any(len(pair) != 2 for pair in pairs) or len({pair[0] for pair in pairs}) != len(pairs):
+        raise InstallError('Legacy installer state contains invalid or repeated keys.')
+    state = dict(pairs)
+    marker = prefix / '.science-owner.json'
+    marker_exists = os.path.lexists(marker)
+    if marker_exists and ownership_json(marker) != {'managed_by': safety.PRODUCT, 'root': str(root)}:
+        raise InstallError('The Science prefix has a conflicting ownership marker.')
+    history = ownership_file(prefix / 'conda-meta/history', package_metadata=True)
+    if not history.strip():
+        raise InstallError('Legacy environment lacks a populated Conda history.')
+    if state.get('status') == 'complete':
+        # A current-style state requires both the recorded package fingerprint
+        # and the independent prefix marker. The root receipt is out of scope.
+        executable = state.get('micromamba_exe', '')
+        if not marker_exists or not Path(executable).is_absolute():
+            raise InstallError('Completed installer state also requires its matching prefix marker and executable path.')
+        verify_legacy_science(root, prefix, {'micromamba_exe': executable})
+        provenance = 'completed-installer-state'
+        recorded = state['package_fingerprint']
+    else:
+        expected = dict(managed_by=safety.PRODUCT, installer_version='ubuntu-lts-v3', micromamba_version='2.8.1',
+                        python_spec='3.14', spyder_spec='6.1.7', layout='home', root=str(root), science=str(prefix))
+        if state != expected or root != home / 'micromamba':
+            raise InstallError('Legacy installer state is not a supported completed format for this root.')
+        launcher = ownership_file(root / 'bin/science-spyder')
+        if hashlib.sha256(launcher).hexdigest() != LEGACY_V3_LAUNCHER:
+            raise InstallError('The V3 home launcher differs from the archived installer launcher.')
+        tail = ['-y', '-n', 'science', '--override-channels', '-c', 'conda-forge', *LEGACY_V3_SPECS]
+        commands = [shlex.split(line[7:]) for line in history.decode().splitlines() if line.startswith('# cmd: ')]
+        if not any(args in ([str(root / 'bin/micromamba'), verb, *tail] for verb in ('create', 'install')) for args in commands):
+            raise InstallError('Conda history does not record the archived V3 create/install command and package requests.')
+        installed = {}
+        for path in (prefix / 'conda-meta').glob('*.json'):
+            item = json.loads(ownership_file(path, package_metadata=True))
+            if not isinstance(item, dict):
+                raise InstallError('Invalid installed package record: ' + path.name)
+            name, version_, build = (item.get(key) for key in ('name', 'version', 'build'))
+            if (not all(isinstance(value, str) and value for value in (name, version_, build)) or name in installed
+                    or path.name != '{}-{}-{}.json'.format(name, version_, build)):
+                raise InstallError('Ambiguous installed package identity: ' + path.name)
+            installed[name] = item
+        for spec in LEGACY_V3_SPECS:
+            name = spec.split('=', 1)[0]
+            item = installed.get(name, {})
+            if not re.fullmatch(r'https://conda\.anaconda\.org/conda-forge/(?:linux-64|noarch)/[^/?#]+', item.get('url') or ''):
+                raise InstallError('V3 package is missing or its conda-forge provenance cannot be verified: ' + name)
+        if not (installed['python']['version'].startswith('3.14.') and installed['spyder']['version'] == '6.1.7'
+                and installed['apache-arrow-proc']['build'] == 'cpu'):
+            raise InstallError('Installed Python, Spyder or Arrow build differs from the archived V3 configuration.')
+        provenance = 'ubuntu-lts-v3'
+        recorded = package_fingerprint(installed)
+    identity = prefix.lstat()
+    return {'format': provenance, 'prefix_identity': [identity.st_dev, identity.st_ino],
+            'state_sha256': hashlib.sha256(state_bytes).hexdigest(), 'history_sha256': hashlib.sha256(history).hexdigest(),
+            'package_fingerprint': recorded}
+
+
+def write_migration_receipt(root, home, mm, approved_evidence):
+    """Publish a complete, environment-only receipt without replacing anything."""
+    root, mm = Path(root), Path(mm)
+    prefix = root / 'envs/science'
+    with locked(root, reuse=True):
+        if using_science(prefix):
+            raise_busy(prefix, 'migrated')
+        if migration_evidence(root, home) != approved_evidence:
+            raise InstallError('Legacy evidence changed after review; retry the migration.')
+        receipt = {'managed_by': safety.PRODUCT, 'scope': 'science-environment', 'root': str(root),
+                   'prefix': str(prefix), 'micromamba_exe': str(mm), 'phase': 'migration', **approved_evidence}
+        with safety.directory_fd(root) as anchor, tempfile.NamedTemporaryFile(dir=root) as temp:
+            temp.write((json.dumps(receipt, indent=2) + '\n').encode()); temp.flush(); os.fsync(temp.fileno())
+            info = os.fstat(anchor)
+            if (info.st_dev, info.st_ino) != (root.stat().st_dev, root.stat().st_ino):
+                raise InstallError('Legacy root changed after review.')
+            os.link(Path(temp.name).name, '.science-env-owner.json', src_dir_fd=anchor, dst_dir_fd=anchor, follow_symlinks=False)
+
+
 def owned_science(root):
     root = Path(root)
     prefix = root / 'envs/science'
@@ -317,16 +418,21 @@ def owned_science(root):
         raise InstallError('Environment ownership receipt has a different root, prefix or scope.')
     phase = receipt.get('phase')
     executable = receipt.get('micromamba_exe')
-    if phase not in ('download', 'transaction', 'installed') or not isinstance(executable, str) or not Path(executable).is_absolute():
+    if phase not in ('download', 'transaction', 'installed', 'migration') or not isinstance(executable, str) or not Path(executable).is_absolute():
         raise InstallError('Environment ownership receipt has an invalid phase or executable path.')
     if not prefix.exists():
-        return True  # Scope covers the installer receipt only.
+        return phase != 'migration'  # Migration never authorizes a different/absent prefix.
     info = prefix.stat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o002:
         raise InstallError('Science directory ownership or permissions are ambiguous.')
     identity = receipt.get('prefix_identity')
     if not (phase == 'download' and identity is None) and identity != [info.st_dev, info.st_ino]:
         raise InstallError('Science directory identity differs from the ownership receipt.')
+    if phase == 'migration':
+        evidence = migration_evidence(root, root.parent if receipt.get('format') == 'ubuntu-lts-v3' else Path.home())
+        if any(receipt.get(key) != value for key, value in evidence.items()):
+            raise InstallError('Legacy evidence changed since migration. The environment is preserved.')
+        return True
     has_marker = os.path.lexists(owner_path)
     if has_marker and ownership_json(owner_path) != {'managed_by': safety.PRODUCT, 'root': str(root)}:
         raise InstallError('Science directory marker disagrees with the environment ownership receipt.')
@@ -354,6 +460,8 @@ def guard_science(root):
 
 
 def approve_plan(plan, before, after):
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
     while True:
         answer = input('Apply these package changes? [y/N/full]: ').strip().lower()
         if answer == 'full':
@@ -445,7 +553,8 @@ def bootstrap(root, config, home=None, fetch=None):
                      (MARKER + '\ninstaller_version=' + config['InstallerVersion'] + '\nstatus=prepared\nlayout=home\n').encode(), 0o600)
     if created_root:
         write_json(root / '.science-root-owner.json', {'managed_by': 'scientific-python-ubuntu', 'scope': 'micromamba-binary',
-            'root': str(root), 'executable': str(root / 'bin/micromamba'), 'sha256': config['MicromambaExeSha256']})
+            'root': str(root), 'executable': str(root / 'bin/micromamba'), 'sha256': config['MicromambaExeSha256'],
+            'created_root_identity': [root.stat().st_dev, root.stat().st_ino]})
     (root / 'tmp').mkdir(exist_ok=True)
     (root / 'bin').mkdir(exist_ok=True)
     mm = root / 'bin/micromamba'
@@ -473,9 +582,6 @@ def bootstrap(root, config, home=None, fetch=None):
         if mm.exists():
             raise InstallError('Existing Micromamba executable differs; it will not be replaced automatically.')
         atomic_bytes(mm, content, 0o755)
-        if created_root:
-            write_json(root / '.science-root-owner.json', {'managed_by': 'scientific-python-ubuntu', 'scope': 'micromamba-binary',
-                'root': str(root), 'executable': str(mm), 'sha256': config['MicromambaExeSha256']})
     return True
 
 
@@ -1100,6 +1206,9 @@ def using_science(prefix):
 def removal_ownership(root):
     root = Path(root)
     guard_science(root)
+    receipt = root / '.science-env-owner.json'
+    if os.path.lexists(receipt) and ownership_json(receipt).get('phase') == 'migration':
+        raise InstallError('A migration receipt allows update only. Complete the verified update before using removal.')
     if (root / 'envs/science').exists():
         return True
     return owned_science(root)
@@ -1259,6 +1368,110 @@ def remove_root(root, home=None, runner=run_process):
         safety.unlink_file(binary)
         for plan in launchers: safety.unlink_file(plan)
     print('Removed only the verified installer-owned Micromamba executable and its owned launchers. Root directory, cache, user files, registries and Bash configuration were preserved.')
+
+DEDICATED_ROOT_RECEIPT = '.science-dedicated-root.json'
+DEDICATED_ROOT_ENTRIES = frozenset('''bin envs pkgs tmp share .scientific-python-installer-state
+    .science-root-owner.json .science-env-owner.json .science-installer.lock .science-attempt.json
+    .science-update-plan.json .science-transactions .science-startup .science-shells .science-launch
+    .science-launchers.json science-runtime.json science-diagnostics.json science-packages.json
+    science-launch-context.json science-spyder-kernel.json science-spyder-startup.json
+    science-fontconfig-repair.json science-other-environments.json'''.split())
+
+
+def dedicated_tree(root):
+    unexpected = {path.name for path in root.iterdir()} - DEDICATED_ROOT_ENTRIES - {DEDICATED_ROOT_RECEIPT}
+    if unexpected:
+        raise InstallError('Unexpected content in root: ' + ', '.join(sorted(unexpected)))
+    if set((root / 'envs').iterdir()) != {root / 'envs/science'} or not removal_ownership(root):
+        raise InstallError('Only the verified and exclusively provisioned Science environment is covered by this root receipt.')
+    if {path.name for path in (root / 'bin').iterdir()} - {'micromamba', 'science-spyder'}:
+        raise InstallError('Unidentified executables exist in the selected root.')
+    tree = safety.tree_plan(root, dedicated=True)
+    entries = {key: identity for key, identity in tree['entries'].items() if key != DEDICATED_ROOT_RECEIPT}
+    return tree, fingerprint(entries)
+
+
+def seal_dedicated_root(root):
+    origin = ownership_json(root / '.science-root-owner.json')
+    if origin.get('created_root_identity') != [root.stat().st_dev, root.stat().st_ino]:
+        raise InstallError('An existing root cannot gain a dedicated-root receipt by updating.')
+    tree, digest = dedicated_tree(root)
+    target = root / DEDICATED_ROOT_RECEIPT
+    if os.path.lexists(target):
+        raise InstallError('Dedicated root receipt already exists; it was not replaced.')
+    write_json(target, {'managed_by': safety.PRODUCT, 'scope': 'dedicated-root', 'root': str(root),
+                        'identity': list(tree['identity']), 'tree_fingerprint': digest})
+
+
+def total_removal_plan(root, home, inventory):
+    root = guard_root(root, home, existing=True)
+    receipt = ownership_json(root / DEDICATED_ROOT_RECEIPT)
+    origin = ownership_json(root / '.science-root-owner.json')
+    binary = root / 'bin/micromamba'
+    if (origin.get('scope') != 'micromamba-binary' or origin.get('managed_by') != safety.PRODUCT
+            or origin.get('root') != str(root) or origin.get('executable') != str(binary)
+            or origin.get('sha256') != release()['MicromambaExeSha256']
+            or hashlib.sha256(ownership_file(binary)).hexdigest() != origin['sha256']):
+        raise InstallError('The root no longer has its original verified executable.')
+    if (inventory.get('unknown') or inventory.get('external_cache_settings') or safety.config_sources(root, home)
+            or any(os.environ.get(key) for key in ('CONDA_ENVS_PATH', 'CONDA_ENVS_DIRS', 'MAMBA_ENVS_DIRS'))):
+        raise InstallError('Unknown inventory, external cache or custom Conda/Mamba settings prevent proving an exclusive root.')
+    for name, row in inventory['details'].items():
+        other = Path(name)
+        if other != root and (other.is_relative_to(root) or root.is_relative_to(other)):
+            raise InstallError('Another detected root overlaps the selected root: ' + name)
+        if other != root and (row['unknown'] or safety.config_sources(other, home)):
+            raise InstallError('Another detected root has unknown contents or settings; cache isolation cannot be established: ' + name)
+    if using_science(root) or using_science(root / 'envs/science') or any(
+        Path(value).is_relative_to(root) for value in (os.environ.get('CONDA_PREFIX'), os.environ.get('MAMBA_ROOT_PREFIX'), os.environ.get('MAMBA_EXE')) if value
+    ):
+        raise InstallError('A process or the calling shell uses the selected root. Start a clean terminal after closing all users.')
+    tree, digest = dedicated_tree(root)
+    if receipt != {'managed_by': safety.PRODUCT, 'scope': 'dedicated-root', 'root': str(root),
+                   'identity': list(tree['identity']), 'tree_fingerprint': digest}:
+        raise InstallError('Root contents changed since verified installation. Nothing was removed.')
+    for name in ('.bashrc', '.bash_profile', '.bash_login', '.profile', '.local/share/scientific-python/micromamba-shell.sh'):
+        path = home / name
+        if os.path.lexists(path) and os.fsencode(root) in ownership_file(path):
+            raise InstallError('Shell configuration directly references the root; review this file before removal: ' + str(path))
+    registry = safety.registry_plan(home)
+    if registry:
+        science = root / 'envs/science'
+        if any(path.is_relative_to(root) and path not in (root, science) for path in registry['paths']):
+            raise InstallError('An unexpected registered environment is inside the selected root.')
+        registry['new'] = b''.join(line for line in registry['original'].splitlines(keepends=True)
+                                   if os.fsdecode(line.rstrip(b'\r\n')) not in (str(root), str(science)))
+    return {'tree': tree, 'registry': registry,
+            'launchers': [plan for plan in launcher_removal_plan(root, home) if not Path(plan['path']).is_relative_to(root)]}
+
+
+def apply_total_removal(root, home, approved, inventory):
+    with locked(root):
+        current = total_removal_plan(root, home, inventory())
+        if current != approved:
+            raise InstallError('Deletion plan changed after approval; no targets removed.')
+        completed = []
+        remaining = [str(root), *[item['path'] for item in current['launchers']]]
+        if current['registry'] and current['registry']['new'] != current['registry']['original']:
+            remaining.append('selected entries in ' + current['registry']['path'])
+        try:
+            safety.check_registry(current['registry'])
+            for plan in current['launchers']:
+                safety.check_file(plan)
+            safety.remove_tree(current['tree'])
+            completed.append(remaining.pop(0))
+            for plan in current['launchers']:
+                safety.unlink_file(plan)
+                completed.append(remaining.pop(0))
+            if remaining:
+                safety.write_registry(current['registry'])
+                completed.append(remaining.pop(0))
+        except (OSError, safety.SafetyError, KeyboardInterrupt) as exc:
+            raise InstallError(json.dumps({'status': 'PARTIAL_OR_BLOCKED', 'root': str(root), 'completed': completed,
+                'remaining_or_incomplete': remaining, 'preserved': 'Other roots, external environments/caches, settings and user package configuration',
+                'reason': str(exc), 'recovery': 'Inspect the remaining paths and backup before retrying; no rollback was attempted.'}, indent=2)) from exc
+        return completed
+
 
 def main():
     parser = argparse.ArgumentParser()

@@ -21,7 +21,7 @@ def public_files(root=ROOT):
         if not path.is_file() or '__pycache__' in relative.parts:continue
         if len(relative.parts)==1 and path.name in ROOT_FILES or relative.parts[0] in PUBLIC_DIRS:
             paths.append(path)
-    return sorted(paths)
+    return sorted(paths, key=lambda path: path.relative_to(root).as_posix())
 
 def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -85,6 +85,6 @@ def audit(root=ROOT):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--refresh-source',action='store_true',help='Maintainer-only source-manifest regeneration');args=parser.parse_args()
-    if args.refresh_source:(ROOT/'SOURCE-SHA256SUMS.txt').write_text(source_manifest(),encoding='ascii')
+    if args.refresh_source:(ROOT/'SOURCE-SHA256SUMS.txt').write_bytes(source_manifest().encode('ascii'))
     result=audit();print(json.dumps(result,indent=2));return 0 if result['pass'] else 1
 if __name__=='__main__':raise SystemExit(main())

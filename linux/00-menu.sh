@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=science-common.sh
 . "$SCRIPT_DIR/science-common.sh"
 while true; do
-    printf '\nScientific Python Ubuntu LTS V4-r5.2\n1  Install/update\nO  Optional packages\n2  Remove Spyder settings\n3  Remove science\n4  Remove owned Micromamba (preserve root/cache)\nI  Info\nD  Diagnostics\nV  Validation only\nC  Package configuration location\nQ  Quit\n'
+    printf '\nScientific Python Ubuntu LTS V4-r5.2\n1  Install/update Scientific Python\nO  Configure optional packages and install/update\n2  Remove Spyder settings\n3  Remove science\n4  Remove owned Micromamba executable (preserve root/cache)\n5  Total Remove: entire verified Micromamba root\nI  Info\nD  Diagnostics\nV  Validation only\nC  Package configuration location\nQ  Quit\n'
     read -r -p 'Selection: ' choice || exit 0
     case "$choice" in
         1) script=01-install-science.sh ;;
@@ -12,6 +12,7 @@ while true; do
         2) script=02-remove-spyder-settings.sh ;;
         3) script=03-remove-science.sh ;;
         4) script=04-remove-micromamba.sh ;;
+        5) python3 "$SCRIPT_DIR/science-install.py" remove-total; continue ;;
         i|I) show_info; continue ;;
         d|D) script=05-diagnostics.sh ;;
         v|V) python3 "$SCRIPT_DIR/science-install.py" validate; continue ;;

@@ -171,6 +171,57 @@ def initialize(directory,root=None,path=None,legacy=None):
     _bind_origin(path,root)
     return value
 
+
+def recover_v3(directory, root, specs, history_requests, path=None):
+    """Recover the archived, verified V3 intent when V3 had no config file."""
+    path = Path(path) if path is not None else active_path()
+    _plain_path(path)
+    if path.exists():
+        raise ConfigError('A saved configuration exists; verify its origin before replacing or migrating it.')
+    old_names = {spec_name(spec) for spec in specs}
+    if history_requests != old_names:
+        raise ConfigError('The V3 request history differs from the archived defaults. Restore its original configuration or explicitly review the requests in a separate root.')
+    value = defaults(directory)
+    defaults_names = {spec_name(spec) for spec in value['ScientificPackages']}
+    value['ScientificPackages'] += [spec for spec in specs if spec_name(spec) not in defaults_names]
+    value = validate(value, directory)
+    _origin_known(path, root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent) as temp:
+        temp.write((json.dumps(value, indent=2) + '\n').encode()); temp.flush(); os.fsync(temp.fileno())
+        os.link(temp.name, path)  # Fails if a config appeared during review.
+    _bind_origin(path, root)
+    return value
+
+
+def review_new_root_configuration(directory, root, existing_roots, reader=input, output=print, path=None):
+    path = Path(path) if path is not None else active_path()
+    _plain_path(path)
+    if not path.exists():
+        output('New root will start with the release defaults (PyTorch is not requested).')
+        return
+    original = path.read_bytes()
+    value = migrate(read_json(path), directory)
+    _, origins, selected = _origin_known(path, root)
+    output('New root would use saved configuration: ' + str(path))
+    output('Saved PyTorch choice: ' + pytorch_backend(value['ScientificPackages']).upper())
+    if value == defaults(directory):
+        return
+    if (set(origins['Roots']) | set(existing_roots)) - {selected}:
+        output('Reset unavailable: another installation may use this configuration. The saved configuration will be preserved.')
+        return
+    if reader('Reset saved package requests to release defaults (no PyTorch)? [y/N]: ').strip().lower() not in ('y', 'yes'):
+        return
+    backup = path.with_name('science-release.pre-reset-' + hashlib.sha256(original).hexdigest() + '.json')
+    _plain_path(backup)
+    if backup.exists():
+        if backup.read_bytes() != original:
+            raise ConfigError('Configuration backup collision: ' + str(backup))
+    else:
+        atomic_write(backup, original)
+    atomic_write(path, (json.dumps(defaults(directory), indent=2) + '\n').encode(), expected=original)
+    output('Previous package configuration saved to ' + str(backup))
+
 def effective(directory,path=None):
     directory=Path(directory);path=Path(path) if path is not None else active_path()
     user=migrate(read_json(path),directory) if path.exists() or path.is_symlink() else defaults(directory)

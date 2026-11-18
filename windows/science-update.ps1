@@ -72,12 +72,48 @@ function Invoke-ScienceNative {
     }
     foreach ($key in $Environment.Keys) { $psi.EnvironmentVariables[$key]=[string]$Environment[$key] }
     $process=New-Object Diagnostics.Process; $process.StartInfo=$psi
+    $started=$false
     try {
         if (-not $process.Start()) { throw 'Could not start the transaction process.' }
+        $started=$true
+        $packagePhase=($Arguments -ccontains '--offline' -and $Arguments -ccontains '--file' -and $Arguments -ccontains '--json')
+        if ($packagePhase) {
+            $buffers=@([pscustomobject]@{Reader=$process.StandardOutput; Data=(New-Object char[] 8192); Text=(New-Object Text.StringBuilder); Task=$null; Overflow=$false},
+                       [pscustomobject]@{Reader=$process.StandardError; Data=(New-Object char[] 8192); Text=(New-Object Text.StringBuilder); Task=$null; Overflow=$false})
+            foreach($buffer in $buffers){$buffer.Task=$buffer.Reader.ReadAsync($buffer.Data,0,$buffer.Data.Length)}
+            $clock=[Diagnostics.Stopwatch]::StartNew();$next=5;$limit=32MB
+            while ($null -ne $buffers[0].Task -or $null -ne $buffers[1].Task -or -not $process.HasExited) {
+                foreach($buffer in $buffers){
+                    if($null -eq $buffer.Task -or -not $buffer.Task.IsCompleted){continue}
+                    $count=$buffer.Task.GetAwaiter().GetResult()
+                    if($count -eq 0){$buffer.Task=$null;continue}
+                    $keep=[Math]::Min($count,$limit-$buffer.Text.Length)
+                    if($keep -gt 0){[void]$buffer.Text.Append($buffer.Data,0,$keep)}
+                    if($keep -lt $count){$buffer.Overflow=$true}
+                    $buffer.Task=$buffer.Reader.ReadAsync($buffer.Data,0,$buffer.Data.Length)
+                }
+                if($clock.Elapsed.TotalSeconds -ge $next -and -not $process.HasExited){
+                    Write-Host ('[6/9] Installing packages  RUNNING  Elapsed: '+$clock.Elapsed.ToString('hh\:mm\:ss')+'  Micromamba process: ACTIVE')
+                    $next=$clock.Elapsed.TotalSeconds+5
+                }
+                if($clock.Elapsed.TotalMinutes -ge 30){throw 'Micromamba did not finish within 30 minutes. Check the interrupted transaction and do not retry blindly.'}
+                if(-not (($null -ne $buffers[0].Task -and $buffers[0].Task.IsCompleted) -or ($null -ne $buffers[1].Task -and $buffers[1].Task.IsCompleted))){Start-Sleep -Milliseconds 25}
+            }
+            $exit=$process.ExitCode
+            $err=$buffers[1].Text.ToString()
+            if($buffers[0].Overflow -or $buffers[1].Overflow){
+                if($exit -eq 0){$exit=1}
+                return @{ExitCode=$exit;Stdout='';Stderr=($err+"`nCapture limit exceeded (native exit $($process.ExitCode)); transaction output cannot be verified.")}
+            }
+            return @{ExitCode=$exit;Stdout=$buffers[0].Text.ToString();Stderr=$err}
+        }
         $stdout=$process.StandardOutput.ReadToEndAsync(); $stderr=$process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
         return @{ExitCode=$process.ExitCode;Stdout=$stdout.GetAwaiter().GetResult();Stderr=$stderr.GetAwaiter().GetResult()}
-    } finally { $process.Dispose() }
+    } finally {
+        if($started -and -not $process.HasExited){try {$process.Kill();[void]$process.WaitForExit(5000)} catch {Write-Warning 'Could not confirm interruption of the Micromamba process.'}}
+        $process.Dispose()
+    }
 }
 function Save-ScienceMambaFailure {
     param($Layout,[string[]]$Arguments,$Result,[string]$Reason,[string]$Directory,[ValidateSet('failure.json','result.json')][string]$SummaryName='failure.json')

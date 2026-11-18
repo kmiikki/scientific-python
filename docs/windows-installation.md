@@ -37,7 +37,7 @@ The launcher targets the selected Science environment and applies the managed Op
 - **D — Diagnostics:** collect a diagnostic report. Inspect it before sharing.
 - **2 — Remove Spyder settings:** removes selected user settings after confirmation.
 - **5 — Remove science:** confirms the supported Science target and preserves the Micromamba installation and other environments.
-- **6 — Remove Micromamba:** a separate, broader operation with additional checks and confirmation. Do not use it to remove only Science.
+- **6 — Whole-root Micromamba removal status:** this action is blocked in the candidate. Windows root and cache exclusivity are not yet verified. No executable, root, cache or user settings are removed by this action.
 
 Close Science processes and deactivate the environment before changing it. If multiple supported layouts exist, verify the selected path in the menu. Other environments are never an implied removal target.
 
@@ -50,4 +50,4 @@ Use **Remove science** after a successful installer finalization. It requires th
 
 ## Windows 11 acceptance
 
-After the approved `main` update, use **Code → Download ZIP** and record the commit being tested. Verify the existing environment's update and no-op paths first. On a separately approved disposable root, test fresh installation, interruption after native commit, recovery without package changes and removal with a second environment present. Test the desktop shortcut, `science-spyder`, the Start-menu entry if present, the first Spyder console, OpenCV/FFV1 and the HDF5 compatibility sample. Choose **O — Optional packages** to test CPU or CUDA PyTorch, then review and approve the solver plan.
+Use the ZIP generated from the recorded candidate commit. Verify the existing environment's update and no-op paths first. On a separately approved disposable root, test fresh installation, interruption after native commit, recovery without package changes and Science-only removal with a second environment present. Test the desktop shortcut, `science-spyder`, the Start-menu entry if present, the first Spyder console, OpenCV/FFV1 and the HDF5 compatibility sample. Choose **O — Configure optional packages and install/update** to test CPU or CUDA PyTorch, then review and approve the solver plan.
