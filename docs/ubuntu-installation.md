@@ -1,6 +1,6 @@
 # Ubuntu installation
 
-Targets: Ubuntu 24.04 LTS and 26.04 LTS, x86-64. Native reinstall/startup acceptance is pending. The installer requires Bash, Ubuntu's system Python 3 and a supported desktop session for graphical launchers. The current platform check requires an ASCII account name.
+Targets: Ubuntu 24.04 LTS and 26.04 LTS, x86-64. The existing-environment update and Spyder startup passed on Niobium with Ubuntu 24.04. Fresh-install and removal acceptance for the current snapshot are pending. The installer requires Bash, Ubuntu's system Python 3 and a supported desktop session for graphical launchers. The current platform check requires an ASCII account name.
 
 ## Start
 
@@ -35,7 +35,7 @@ The default environment is `~/micromamba/envs/science`. The package manager reso
 
 Open **Scientific Python - Spyder** from the application menu, or use `science-spyder` in a new terminal. Desktop shortcut support depends on the session; follow the installer instructions for trusting the shortcut or use the application menu.
 
-For development-release acceptance, open the first IPython kernel and check numerical, image/video and new-package imports. Launcher persistence after signing out and back in is a separate manual check. These tests have not yet been marked accepted on Ubuntu 24.04 or 26.04.
+For development-release acceptance, open the first IPython kernel and check numerical, image/video and new-package imports. Launcher persistence after signing out and back in is a separate manual check. Spyder GUI, the IPython kernel and the scientific runtime checks passed on Niobium with Ubuntu 24.04. Native acceptance on Ubuntu 26.04 is pending. See [native acceptance results](testing.md#niobium-native-acceptance).
 
 ## Configuration and maintenance
 

@@ -1,8 +1,8 @@
 # Known limitations
 
-## Acceptance pending
+## Platform acceptance
 
-Niobium's existing Ubuntu 24.04 Science environment passed package imports, including all seven release additions, a headless Spyder IPython kernel, Qt6/OpenCV build checks and the lossless FFV1/MKV round trip. Graphical Spyder startup, the GUI-connected first console and a live installer update/removal remain pending for this development snapshot.
+Niobium passed the Ubuntu 24.04 update of the existing Science environment, Spyder GUI and IPython, media checks, and PyTorch CUDA installation and computation. Fresh installation and removal for the current snapshot remain outside that acceptance. See the [native test results](testing.md#niobium-native-acceptance).
 
 The earlier HP Z240 Ubuntu 26.04.1 fresh installation succeeded in an existing root. The updated ownership path still needs native acceptance on that machine. The iridium evidence contains a completed state and installed package inventory. Its collected environment ownership receipt is missing, so update and removal remain blocked until matching environment-specific proof is available.
 
@@ -17,7 +17,7 @@ The Windows OpenCV 5.1.0 test used HDF5 1.14.6. With that runtime the HDF5 2.2.0
 - There is one active per-user configuration per platform, not independent root profiles.
 - Removing a request does not automatically uninstall its package. No Synchronize, package ownership or pending-retirement feature is included.
 - Legacy native package-history restrictions may produce a solver conflict. Such conflicts stop; they are not bypassed by guessing old user intent.
-- Optional PyTorch is requested through **Optional packages** or the advanced configuration. CPU and CUDA checks run with the selected build. Native installation and CUDA acceptance on the supported platforms are pending. On Niobium, Micromamba 2.10.0 reports the local Toolkit’s CUDA 12.9 ahead of the driver’s CUDA 13.2 capability. The installer applies the verified driver value to its Micromamba subprocesses and validates the selected cuda-arch minimum against the GPU. Niobium’s installer dry run produced a CUDA 13.5 plan using [NVIDIA CUDA 13 minor-version compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html). New driver features and PTX JIT can still require a newer driver. Installation and runtime GPU acceptance remain pending.
+- Optional PyTorch is requested through **Optional packages** or the advanced configuration. Niobium passed installation and a GPU matrix multiplication using NVIDIA CUDA 13 minor-version compatibility. The installer reported CUDA 13.5 dependency compatibility and PyTorch reported CUDA 13.4. This result covers the tested GPU and driver. Newer driver features and PTX JIT can still require a driver upgrade. GPU acceptance on Windows 11 and Ubuntu 26.04 remains pending. [NVIDIA CUDA compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)
 - Bleach/tinycss2 selection depends on the full solver result and upstream metadata. There is no new permanent Bleach or tinycss2 pin.
 
 ## Transaction boundaries

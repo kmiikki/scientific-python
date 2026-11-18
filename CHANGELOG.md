@@ -7,6 +7,7 @@
 - Resume Windows finalization from matching approved package identities and require a matching prefix ownership marker for removal.
 - Check Ubuntu Science environment ownership independently of the Micromamba root.
 - Add optional PyTorch CPU/CUDA selection to both installer menus, with configuration backups and runtime backend checks.
+- Verify the NVIDIA driver and GPU capability when solving CUDA packages. Document native Niobium acceptance for the existing-environment update, Spyder and PyTorch CUDA computation.
 
 ## 0.1.0 Development Release — preparation, 2026-11-17
 
