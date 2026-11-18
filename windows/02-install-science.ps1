@@ -584,10 +584,12 @@ Write-Host ''
 Write-Host 'Checking conda-forge metadata...'
 Write-Host ''
 
-$scienceChannelArgs=Get-ScienceChannelArguments $script:ScienceRelease
-$repoOut = Join-Path $layout.Tmp ('repoquery-' + [guid]::NewGuid().ToString('N') + '.txt')
-
+$updateTrace=New-ScienceUpdateTrace
+Start-ScienceUpdatePhase $updateTrace 'Conda-forge metadata visibility'
+$repoOut=$null
 try {
+    $scienceChannelArgs=Get-ScienceChannelArguments $script:ScienceRelease
+    $repoOut = Join-Path $layout.Tmp ('repoquery-' + [guid]::NewGuid().ToString('N') + '.txt')
     & $layout.Micromamba repoquery search "python=$PythonSpec" `
         --override-channels `
         @scienceChannelArgs `
@@ -603,9 +605,12 @@ try {
     }
 
     Write-Host $repoText.TrimEnd()
+} catch {
+    Stop-ScienceUpdatePhase $updateTrace $_
+    Stop-Install $_.Exception.Message
 }
 finally {
-    Remove-Item -LiteralPath $repoOut -Force -ErrorAction SilentlyContinue
+    if($repoOut){Remove-Item -LiteralPath $repoOut -Force -ErrorAction SilentlyContinue}
 }
 
 if (
@@ -613,19 +618,23 @@ if (
     $repoText -match '(?i)No entries matching' -or
     $repoText -notmatch '(?im)^\s*python\s+3\.14(?:\.|\s)'
 ) {
+    Write-ScienceUpdateTrace $updateTrace 'Python 3.14 metadata was not visible or the query failed.'
+    Stop-ScienceUpdatePhase $updateTrace
     Stop-Install 'Python 3.14 is not visible in conda-forge metadata.'
 }
 
-$packages = @(Get-SciencePackageSpecs)
-
-$scienceExistedBefore = Test-Path -LiteralPath $layout.Science -PathType Container
-
 try {
-    Invoke-ScienceEnvironmentSync -Layout $layout -Packages $packages -AfterSync {
+    Start-ScienceUpdatePhase $updateTrace 'Package requests and existing prefix'
+    $packages = @(Get-SciencePackageSpecs)
+    $scienceExistedBefore = Test-Path -LiteralPath $layout.Science -PathType Container
+    Invoke-ScienceEnvironmentSync -Layout $layout -Packages $packages -Trace $updateTrace -AfterSync {
         param($PreparedState,$RecoveryEvidence)
         Complete-ScienceInstallation -Layout $layout -State $PreparedState -RecoveryEvidence $RecoveryEvidence
     }
-} catch { Stop-Install $_.Exception.Message }
+} catch {
+    Stop-ScienceUpdatePhase $updateTrace $_
+    Stop-Install $_.Exception.Message
+}
 
 
 Write-Host ''

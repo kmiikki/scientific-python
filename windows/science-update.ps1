@@ -2,6 +2,52 @@
 . (Join-Path $PSScriptRoot 'science-integrity.ps1')
 Assert-ScienceBundle $PSScriptRoot
 
+# Trace only fixed stage labels, counts and exception types. Never write raw
+# exceptions, package URLs, arguments, or configuration data into this log.
+function New-ScienceUpdateTrace {
+    $path=Join-Path ([IO.Path]::GetTempPath()) ('scientific-python-update-'+[Guid]::NewGuid().ToString('N')+'.log')
+    try {
+        $file=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+        $file.Dispose()
+        Write-Host "Update phase log: $path"
+        return @{Path=$path;Step=$null;Last='none';Clock=$null}
+    } catch {
+        Write-Warning 'Could not create the update phase log; console status is still available.'
+        return @{Path=$null;Step=$null;Last='none';Clock=$null}
+    }
+}
+function Write-ScienceUpdateTrace {
+    param($Trace,[string]$Message)
+    if(-not $Trace){return}
+    Write-Host "[Update] $Message"
+    if($Trace.Path){
+        try{[IO.File]::AppendAllText($Trace.Path,([DateTime]::UtcNow.ToString('o')+' '+$Message+[Environment]::NewLine))}
+        catch{$Trace.Path=$null;Write-Warning 'Could not append to the update phase log.'}
+    }
+}
+function Complete-ScienceUpdatePhase {
+    param($Trace)
+    if(-not $Trace -or -not $Trace.Step){return}
+    $Trace.Last=$Trace.Step
+    Write-ScienceUpdateTrace $Trace ('DONE {0} ({1:0.00} s)' -f $Trace.Step,$Trace.Clock.Elapsed.TotalSeconds)
+    $Trace.Step=$null
+}
+function Start-ScienceUpdatePhase {
+    param($Trace,[string]$Stage)
+    if(-not $Trace){return}
+    Complete-ScienceUpdatePhase $Trace
+    $Trace.Step=$Stage
+    $Trace.Clock=[Diagnostics.Stopwatch]::StartNew()
+    Write-ScienceUpdateTrace $Trace ("START $Stage")
+}
+function Stop-ScienceUpdatePhase {
+    param($Trace,$Failure)
+    if(-not $Trace -or -not $Trace.Step){return}
+    $errorType=if($Failure){$Failure.Exception.GetType().Name}else{'CheckFailed'}
+    Write-ScienceUpdateTrace $Trace ('FAIL {0} ({1:0.00} s); type={2}; last completed={3}' -f $Trace.Step,$Trace.Clock.Elapsed.TotalSeconds,$errorType,$Trace.Last)
+    $Trace.Step=$null
+}
+
 # Transaction preflight and the narrowly scoped legacy librsvg cache hook guard.
 # Source this file; it has no top-level package or persistent-environment mutations.
 function Get-ScienceRecords {
@@ -330,27 +376,47 @@ function Assert-ScienceRecordedPrefix {
     }
 }
 function Find-ScienceApprovedRecovery {
-    param($Layout,$Installed,[string]$ConfigHash)
+    param($Layout,$Installed,[string]$ConfigHash,$Trace)
     if(-not $Installed.Count){return $null}
     $identity=Get-ScienceRecordSignature @($Installed.Values)
     $exeHash=Get-ScienceFileSha256 $Layout.Micromamba
-    $directories=Get-ChildItem -LiteralPath $Layout.Tmp -Filter 'science-transaction-*' -Directory | Sort-Object LastWriteTimeUtc -Descending
+    $directories=@(Get-ChildItem -LiteralPath $Layout.Tmp -Filter 'science-transaction-*' -Directory | Sort-Object LastWriteTimeUtc -Descending)
+    $candidate=0
+    $nextUpdate=0
+    $unusable=0
     foreach($directory in $directories) {
         if($directory.Name -cnotmatch '^science-transaction-[0-9a-f]{32}$'){continue}
+        $candidate++
         try {
             $path=Join-Path $directory.FullName 'approved-lock.json'
             Assert-ScienceTransactionPath $directory.FullName
             Assert-ScienceRegularPath $path
+            $bytes=([IO.FileInfo]::new($path)).Length
+            if($Trace -and ($bytes -ge 8MB -or $Trace.Clock.Elapsed.TotalSeconds -ge $nextUpdate)){
+                Write-ScienceUpdateTrace $Trace ('Recovery evidence: checking file {0} of {1}, {2} bytes' -f $candidate,$directories.Count,$bytes)
+                $nextUpdate=$Trace.Clock.Elapsed.TotalSeconds+5
+            }
+            $readClock=[Diagnostics.Stopwatch]::StartNew()
             $lock=Read-ScienceJson $path
+            if($readClock.Elapsed.TotalSeconds -ge 5){
+                Write-ScienceUpdateTrace $Trace ('Recovery evidence: parsed file {0} in {1:0.00} s' -f $candidate,$readClock.Elapsed.TotalSeconds)
+            }
             if($lock.schema -eq 1 -and $lock.prefix -ieq $Layout.Science -and $lock.config_sha256 -ceq $ConfigHash -and
                 $lock.executable_sha256 -ceq $exeHash -and (Get-ScienceRecordSignature @($lock.after)) -ceq $identity) {
+                Write-ScienceUpdateTrace $Trace ('Recovery evidence: exact identity match in file {0}; unusable files so far: {1}.' -f $candidate,$unusable)
                 return $directory.Name
             }
         } catch {
             # Incomplete or redirected evidence cannot authorize recovery.
+            $unusable++
+            if($Trace -and $Trace.Clock.Elapsed.TotalSeconds -ge $nextUpdate){
+                Write-ScienceUpdateTrace $Trace ('Recovery evidence: unusable file {0}; type={1}' -f $candidate,$_.Exception.GetType().Name)
+                $nextUpdate=$Trace.Clock.Elapsed.TotalSeconds+5
+            }
             continue
         }
     }
+    Write-ScienceUpdateTrace $Trace ('Recovery evidence: no exact match in {0} candidates; {1} incomplete, unsafe or invalid.' -f $candidate,$unusable)
     return $null
 }
 function Repair-ScienceInstalledSources {
@@ -471,34 +537,39 @@ function Assert-ScienceCudaSolution {
     return $true
 }
 function Invoke-ScienceEnvironmentSync {
-    param($Layout,[string[]]$Packages,[scriptblock]$AfterSync)
-    if(-not $Layout -or -not $Layout.Root -or -not $Layout.Science -or -not $Layout.Micromamba){throw 'A verified installation layout is required.'}
-    foreach($path in @($Layout.Root,$Layout.Science,$Layout.Micromamba,$Layout.Tmp,$Layout.Pkgs)){Assert-ScienceTransactionPath $path}
-    if([IO.Path]::GetFullPath($Layout.Science) -ine [IO.Path]::GetFullPath((Join-Path $Layout.Root 'envs/science'))){throw 'Unexpected Science prefix.'}
-    Assert-ScienceRegularPath $Layout.Micromamba
-    if((Get-ScienceFileSha256 $Layout.Micromamba) -cne $script:ScienceRelease.MicromambaSha256){throw 'Unverified Micromamba executable.'}
-    Assert-ScienceNotInUse $Layout
-    $configPath=Get-ScienceConfigurationPath
-    $initialConfigHash=Get-ScienceFileSha256 $configPath
-    $effective=Get-ScienceEffectiveRelease
-    if(($Packages -join "`n") -cne ($effective.ScientificPackages -join "`n")){throw 'Package requests differ from the active JSON.'}
-    $script:ScienceRelease=$effective
-    $torchBackend=Get-SciencePyTorchBackend $Packages
-    $cuda=$null
-    $cudaArgs=@{}
-    if($torchBackend -ceq 'cuda'){
-        $cuda=Get-ScienceCudaSolverSettings $Layout
-        if($cuda.Overrides.Count){$cudaArgs['CudaOverrides']=$cuda.Overrides}
-    }
-    if($torchBackend -cin @('cpu','cuda')){
-        Write-Host ('PyTorch backend requested: '+$torchBackend.ToUpperInvariant()+'.')
-    }
+    param($Layout,[string[]]$Packages,[scriptblock]$AfterSync,$Trace)
     $exclusive=$null
     try {
+        Start-ScienceUpdatePhase $Trace 'Layout and executable verification'
+        if(-not $Layout -or -not $Layout.Root -or -not $Layout.Science -or -not $Layout.Micromamba){throw 'A verified installation layout is required.'}
+        foreach($path in @($Layout.Root,$Layout.Science,$Layout.Micromamba,$Layout.Tmp,$Layout.Pkgs)){Assert-ScienceTransactionPath $path}
+        if([IO.Path]::GetFullPath($Layout.Science) -ine [IO.Path]::GetFullPath((Join-Path $Layout.Root 'envs/science'))){throw 'Unexpected Science prefix.'}
+        Assert-ScienceRegularPath $Layout.Micromamba
+        if((Get-ScienceFileSha256 $Layout.Micromamba) -cne $script:ScienceRelease.MicromambaSha256){throw 'Unverified Micromamba executable.'}
+        Start-ScienceUpdatePhase $Trace 'Process usage check'
+        Assert-ScienceNotInUse $Layout
+        Start-ScienceUpdatePhase $Trace 'Configuration and solver options'
+        $configPath=Get-ScienceConfigurationPath
+        $initialConfigHash=Get-ScienceFileSha256 $configPath
+        $effective=Get-ScienceEffectiveRelease
+        if(($Packages -join "`n") -cne ($effective.ScientificPackages -join "`n")){throw 'Package requests differ from the active JSON.'}
+        $script:ScienceRelease=$effective
+        $torchBackend=Get-SciencePyTorchBackend $Packages
+        $cuda=$null
+        $cudaArgs=@{}
+        if($torchBackend -ceq 'cuda'){
+            $cuda=Get-ScienceCudaSolverSettings $Layout
+            if($cuda.Overrides.Count){$cudaArgs['CudaOverrides']=$cuda.Overrides}
+        }
+        if($torchBackend -cin @('cpu','cuda')){
+            Write-Host ('PyTorch backend requested: '+$torchBackend.ToUpperInvariant()+'.')
+        }
+        Start-ScienceUpdatePhase $Trace 'Update lock'
         $lockPath=Join-Path $Layout.Root '.science-update.lock'
         Assert-ScienceTransactionPath $lockPath
         $exclusive=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
         if($AfterSync) {
+            Start-ScienceUpdatePhase $Trace 'Prepared state and prefix ownership'
             $state=Get-SciencePreparedInstallationState $Layout
             $onCommit={
                 $null=Get-SciencePreparedInstallationState $Layout
@@ -508,9 +579,12 @@ function Invoke-ScienceEnvironmentSync {
             if([IO.Directory]::Exists($Layout.Science)){
                 if($state.science_owner_id){Assert-ScienceOwnedPrefix $Layout $state}
                 if($state.finalization_stage -cne 'complete' -or -not $state.science_owner_id){
+                    Start-ScienceUpdatePhase $Trace 'Installed identities for legacy or interrupted update'
                     $before=Get-ScienceRecords $Layout.Science
-                    $evidence=Find-ScienceApprovedRecovery $Layout $before $initialConfigHash
+                    Start-ScienceUpdatePhase $Trace 'Approved transaction evidence'
+                    $evidence=Find-ScienceApprovedRecovery $Layout $before $initialConfigHash $Trace
                     if($evidence) {
+                        Start-ScienceUpdatePhase $Trace 'Approved recovery snapshot and review'
                         $recoveryDigest=Get-SciencePrefixDigest $Layout.Science
                         $null=Assert-SciencePlan ([pscustomobject]@{success=$true;actions=$null}) $before (Get-ScienceMediaFloors $before) $Packages
                         if(-not (Test-ScienceInteractiveConfiguration)){throw 'Interrupted installation finalization requires an interactive console.'}
@@ -522,13 +596,16 @@ function Invoke-ScienceEnvironmentSync {
                         if((Get-SciencePrefixDigest $Layout.Science) -cne $recoveryDigest -or (Get-ScienceFileSha256 $configPath) -cne $initialConfigHash){
                             throw 'Approved recovery inputs changed.'
                         }
+                        Start-ScienceUpdatePhase $Trace 'Approved recovery source verification and finalization'
                         Repair-ScienceInstalledSources $Layout $before @($effective.Channels) $configPath $initialConfigHash
                         if($cuda){$null=Assert-ScienceCudaSolution (Get-ScienceRecords $Layout.Science) $cuda}
                         Update-SciencePixbufCache $Layout
                         & $AfterSync $state $evidence
+                        Complete-ScienceUpdatePhase $Trace
                         return
                     }
                     if(-not $state.science_owner_id){
+                        Start-ScienceUpdatePhase $Trace 'Last verified package manifest'
                         if(-not $state.last_sync_utc){throw 'The existing Science prefix has no completed installer state or matching approved transaction.'}
                         Assert-ScienceRecordedPrefix $Layout $before
                     }
@@ -537,6 +614,7 @@ function Invoke-ScienceEnvironmentSync {
         }
         # Each necessary repair has its own displayed, approved and locked transaction.
         # The main solve happens afterwards, before its separate approval.
+        Start-ScienceUpdatePhase $Trace 'GTK payload and repair preflight'
         foreach($name in @('libglib','gdk-pixbuf','librsvg')) {
             $before=Get-ScienceRecords $Layout.Science
             if(-not $before.ContainsKey($name)){continue}
@@ -555,6 +633,7 @@ function Invoke-ScienceEnvironmentSync {
             if((Get-ScienceFileSha256 $configPath) -cne $initialConfigHash){throw 'Configuration changed during planning; start again.'}
             Invoke-ScienceReviewedTransaction $Layout $before $repair $configPath @($name) -OnCommit $onCommit @cudaArgs
         }
+        Start-ScienceUpdatePhase $Trace 'Package solver inputs'
         $before=Get-ScienceRecords $Layout.Science;$floors=Get-ScienceMediaFloors $before
         $isInstalled=[IO.Directory]::Exists((Join-Path $Layout.Science 'conda-meta'))
         if([IO.Directory]::Exists($Layout.Science) -and -not $isInstalled){throw 'Existing Science directory has no package metadata; preserve it and investigate.'}
@@ -563,6 +642,7 @@ function Invoke-ScienceEnvironmentSync {
         if($isInstalled){$arguments+='--all'}
         $arguments+=@($Packages)+@("opencv>=$($floors.opencv)","ffmpeg>=$($floors.ffmpeg)")
         Write-Host 'Solving the complete environment before approval...'
+        Start-ScienceUpdatePhase $Trace 'Micromamba solver dry run'
         $solveArgs=$cudaArgs.Clone()
         $solveArguments=$arguments
         if($cuda -and @($Packages|Where-Object {(Get-ScienceSpecName $_) -ceq 'cuda-version'}).Count -eq 0){
@@ -570,6 +650,7 @@ function Invoke-ScienceEnvironmentSync {
             $solveArguments+="cuda-version<$($cuda.RuntimeLimit)"
         }
         $plan=Invoke-ScienceMambaJson $Layout $solveArguments @solveArgs
+        Start-ScienceUpdatePhase $Trace 'Solver result verification'
         $after=Assert-SciencePlan $plan $before $floors $Packages
         if($cuda){
             $minor=Assert-ScienceCudaSolution $after $cuda
@@ -587,6 +668,7 @@ function Invoke-ScienceEnvironmentSync {
         }
         if((Get-ScienceFileSha256 $configPath) -cne $initialConfigHash){throw 'Configuration changed during planning; start again.'}
         if(-not @(@($plan.actions.LINK)+@($plan.actions.UNLINK)|Where-Object {$null -ne $_}).Count){
+            Start-ScienceUpdatePhase $Trace 'No-change source verification and finalization review'
             Repair-ScienceInstalledSources $Layout $before @($effective.Channels) $configPath $initialConfigHash
             if($AfterSync){
                 $finalizationDigest=Get-SciencePrefixDigest $Layout.Science
@@ -600,12 +682,19 @@ function Invoke-ScienceEnvironmentSync {
                 & $AfterSync $state $null
             }
             Write-Host 'The environment already satisfies the resolved requests.'
+            Complete-ScienceUpdatePhase $Trace
             return
         }
+        Start-ScienceUpdatePhase $Trace 'Package transaction review and execution if approved'
         Invoke-ScienceReviewedTransaction $Layout $before $plan $configPath -OnCommit $onCommit @cudaArgs
+        Start-ScienceUpdatePhase $Trace 'Installed identities and finalization'
         $null=Assert-SciencePlan ([pscustomobject]@{success=$true;actions=$null}) (Get-ScienceRecords $Layout.Science) $floors $Packages
         Write-Host 'Approved package identities and GTK cache checks passed.'
         if($AfterSync){& $AfterSync $state $null}
+        Complete-ScienceUpdatePhase $Trace
+    } catch {
+        Stop-ScienceUpdatePhase $Trace $_
+        throw
     } finally {if($exclusive){$exclusive.Dispose()}}
 }
 . (Join-Path $PSScriptRoot 'science-transaction.ps1')

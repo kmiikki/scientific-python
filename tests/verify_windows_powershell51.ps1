@@ -11,7 +11,7 @@ foreach($file in Get-ChildItem -LiteralPath (Join-Path $repo 'windows'),$PSScrip
     if($parseErrors){throw ($file.Name+': '+($parseErrors.Message -join '; '))}
 }
 $shell=Join-Path $PSHOME 'powershell.exe'
-foreach($test in 'test_whole_root_windows.ps1','test_package_progress.ps1','test_configuration.ps1',
+foreach($test in 'test_strict_json_performance.ps1','test_whole_root_windows.ps1','test_package_progress.ps1','test_configuration.ps1',
                  'test_optional_packages.ps1','test_fresh_commit.ps1','test_removal_policy.ps1','test_windows_recovery.ps1'){
     Write-Host "Running $test in Windows PowerShell 5.1"
     & $shell -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot $test)
