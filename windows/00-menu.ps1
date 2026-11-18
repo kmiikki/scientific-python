@@ -243,6 +243,7 @@ while ($true) {
     Write-Host 'Choose an action:'
     Write-Host ''
     Write-Host '  1  Install/update Scientific Python'
+    Write-Host '  O  Optional packages'
     Write-Host ''
     Write-Host '  2  Apply/repair the OpenCL patch'
     Write-Host '  3  Show OpenCL patch status'
@@ -260,7 +261,12 @@ while ($true) {
     $choice = (Read-Host 'Selection').Trim()
 
     switch -Regex ($choice) {
-        '^1$' {
+        '^(?i:1|o|optional packages)$' {
+            $optional=$choice -cne '1'
+            if($optional -and -not (Test-ScienceInteractiveConfiguration)){
+                Write-Host 'Optional package selection requires an interactive console.'
+                exit 1
+            }
             try {
                 $layout = Select-ScienceInstallLayout -Mode $Mode -Interactive
             }
@@ -279,6 +285,10 @@ while ($true) {
             try {
                 # Preserve uncertain legacy installations before preparation changes Windows settings.
                 $null=Initialize-ScienceConfiguration -Root $layout.Root
+                if($optional -and -not (Select-ScienceOptionalPackages)){
+                    Pause-Menu
+                    continue
+                }
             } catch {
                 Write-Host ('Migration stopped before Windows preparation: '+$_.Exception.Message) -ForegroundColor Red
                 Pause-Menu
@@ -308,7 +318,8 @@ while ($true) {
                 continue
             }
 
-            $rc = Invoke-Step '02-install-science.ps1' $modeArg
+            $installArg=if($optional){"$modeArg -SkipReleaseDefaultOffer"}else{$modeArg}
+            $rc = Invoke-Step '02-install-science.ps1' $installArg
             if ($rc -eq 0) {
                 Write-Host ''
                 Write-Host 'Installation finished.' -ForegroundColor Green

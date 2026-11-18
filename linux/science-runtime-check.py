@@ -119,7 +119,8 @@ def packages(prefix):
         require(shapely.geometry.Point(0,0).buffer(1).area>3, 'GEOS failed');probes['geos']=True
     torch_requests = tools.PYTORCH_REQUESTS & package_names
     if torch_requests:
-        probes['pytorch'] = tools.pytorch_probe(torch_requests)
+        backend = tools.pytorch_backend(config['ScientificPackages'])
+        probes['pytorch'] = tools.pytorch_probe(torch_requests, backend)
         imports.extend({'package': name, 'module': 'torch', 'status': 'PASS'} for name in sorted(torch_requests))
     return dict(probes, imports=len(modules), package_selection=tools.coverage(config,defaults,installed.values(),imports), versions={name: installed[name]['version'] for name in ['python','opencv','ffmpeg','spyder']})
 

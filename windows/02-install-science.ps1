@@ -1,7 +1,9 @@
 ﻿[CmdletBinding()]
 param(
     [ValidateSet('Auto', 'Home', 'Safe')]
-    [string]$Mode = 'Auto'
+    [string]$Mode = 'Auto',
+
+    [switch]$SkipReleaseDefaultOffer
 )
 . (Join-Path $PSScriptRoot 'science-integrity.ps1')
 Assert-ScienceBundle $PSScriptRoot
@@ -418,7 +420,9 @@ catch {
 
 try {
     $null=Initialize-ScienceConfiguration -Root $layout.Root
-    $null=Update-ScienceReleasePackages -Interactive (Test-ScienceInteractiveConfiguration)
+    if(-not $SkipReleaseDefaultOffer){
+        $null=Update-ScienceReleasePackages -Interactive (Test-ScienceInteractiveConfiguration)
+    }
     $script:ScienceRelease=Get-ScienceEffectiveRelease
     Assert-ScienceWorkflowConfiguration $script:ScienceRelease
     $packages=@(Get-SciencePackageSpecs)

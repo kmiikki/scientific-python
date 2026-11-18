@@ -33,9 +33,13 @@ Add `"pingouin"` as another comma-separated item to request it. Replace an exist
 
 ### Optional PyTorch
 
-Add one PyTorch request to your active package list. Use `"pytorch-cpu"` for a CPU build, or `"pytorch-gpu"` for a CUDA build with a working NVIDIA driver. Add a version constraint such as `"pytorch-cpu=2.13.0"` to select a version. The solver checks available builds against Python 3.14, the existing environment and the detected CUDA capability. The plain `"pytorch"` request lets the solver select the build.
+Open the installer and choose **O — Optional packages**. The menu shows the configured PyTorch backend and whether an NVIDIA device is detectable with the installed driver. Choose **1 — PyTorch CPU** or **2 — PyTorch NVIDIA CUDA**. The installer saves the selected build constraint and continues to **Install/update**. Micromamba checks available builds against Python 3.14, the other requests and, for CUDA, the driver it detects. Review the proposed package changes and approve the transaction to install. A declined transaction leaves the selection saved for the next run.
 
-Run **Install/update**, review the proposed additions, replacements, removals and downgrades, and approve the package transaction if the plan is acceptable. The runtime report records the selected backend and verifies matrix multiplication and autograd on CPU. For a working CUDA build it also checks the device capability, GPU matrix multiplication and CPU–GPU transfers. CUDA acceptance on the target machines is pending.
+Choose **R — Remove the PyTorch request** and confirm to clear the request from the configuration. The operation returns to the menu and leaves installed packages in place. A changed selection saves the previous configuration as `science-release.optional-<SHA-256>.json` in the configuration directory. Selecting the same backend again leaves the configuration bytes and backup history intact.
+
+Advanced users can still edit JSON. For example, `"pytorch[version='>=2.13,<3',build='cpu*']"` selects a CPU build within a version range. Plain `"pytorch"` lets Micromamba select the variant. The menu retains version and channel constraints and refuses to overwrite a specific build pin that conflicts with the new backend.
+
+The runtime report records the backend and checks CPU matrix multiplication and autograd. With a working CUDA backend it also verifies device capability, GPU matrix multiplication and CPU–GPU transfers. Native PyTorch installation and GPU execution remain acceptance tests. See [known limitations](known-limitations.md#configuration-and-updates) for Micromamba’s CUDA solver compatibility.
 
 Torchvision, LightGBM and Pingouin are also optional. Torchvision can bring PyTorch as a dependency.
 

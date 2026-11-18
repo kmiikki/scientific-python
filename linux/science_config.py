@@ -2,6 +2,7 @@
 No dependency solver. MatchSpec semantics are checked by Micromamba preflight.
 """
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,14 @@ class ConfigError(ValueError):
 def shared(directory):
     directory=Path(directory)
     return directory/'shared' if (directory/'shared').is_dir() else directory.parent/'shared'
+
+_package_report_spec = importlib.util.spec_from_file_location(
+    'science_config_package_report', shared(Path(__file__).resolve().parent) / 'science_package_report.py'
+)
+_package_report = importlib.util.module_from_spec(_package_report_spec)
+_package_report_spec.loader.exec_module(_package_report)
+pytorch_backend = _package_report.pytorch_backend
+
 
 def _pairs(items):
     value={}
@@ -206,3 +215,54 @@ def offer_release_packages(directory,path=None,interactive=False,reviewer=None,o
     atomic_write(path,(json.dumps(candidate,indent=2,ensure_ascii=False)+'\n').encode('utf-8'),expected=original)
     output('Approved release requests added to configuration. The package transaction still requires separate approval.')
     return candidate
+
+
+def choose_pytorch_request(directory, choice, path=None, expected=None):
+    """Save the optional request and a copy of the exact previous configuration."""
+    if choice not in ('cpu', 'cuda', 'remove'):
+        raise ConfigError('Unknown PyTorch selection.')
+    path = Path(path) if path is not None else active_path()
+    _plain_path(path)
+    original = path.read_bytes()
+    value = validate(read_json(path), directory)
+    if (expected is not None and original != expected) or path.read_bytes() != original:
+        raise ConfigError('Configuration changed during review; start again.')
+    packages = value['ScientificPackages']
+    torch_specs = [spec for spec in packages if spec_name(spec) in _package_report.PYTORCH_REQUESTS]
+    if choice == 'remove':
+        selected = [spec for spec in packages if spec not in torch_specs]
+    else:
+        current = pytorch_backend(torch_specs)
+        if current == choice:
+            return None
+        if any(spec_name(spec) != 'pytorch' for spec in torch_specs):
+            raise ConfigError('Remove the previous PyTorch add-on request before selecting a different backend.')
+        build = choice + '*'
+        if not torch_specs:
+            selected = [*packages, f"pytorch[build='{build}']"]
+        else:
+            spec = torch_specs[0]
+            match = _package_report.PYTORCH_BUILD_ATTRIBUTE.search(spec)
+            if match and match['build'] in ('cpu*', 'cuda*'):
+                chosen = spec[:match.start('build')] + build + spec[match.end('build'):]
+            elif match or re.search(r'(?:\[|,)\s*build\s*=', spec) or _package_report.PYTORCH_POSITIONAL_BUILD.search(spec):
+                raise ConfigError('The PyTorch request has an explicit build constraint. Review it before switching backends.')
+            elif spec.endswith(']'):
+                chosen = spec[:-1] + f",build='{build}']"
+            else:
+                chosen = spec + f"[build='{build}']"
+            selected = [chosen if item == spec else item for item in packages]
+    if selected == packages:
+        return None
+    candidate = validate(dict(value, ScientificPackages=selected), directory)
+    require_workflow(candidate)
+    digest = hashlib.sha256(original).hexdigest()
+    backup = path.with_name('science-release.optional-' + digest + '.json')
+    _plain_path(backup)
+    if backup.exists():
+        if not backup.is_file() or backup.read_bytes() != original:
+            raise ConfigError('Optional-package backup collision: ' + str(backup))
+    else:
+        atomic_write(backup, original)
+    atomic_write(path, (json.dumps(candidate, indent=2, ensure_ascii=False) + '\n').encode('utf-8'), expected=original)
+    return backup

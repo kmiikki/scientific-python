@@ -6,7 +6,7 @@
 - Verify retained Windows packages with conda-forge before restoring missing or temporary package sources.
 - Resume Windows finalization from matching approved package identities and require a matching prefix ownership marker for removal.
 - Check Ubuntu Science environment ownership independently of the Micromamba root.
-- Add CPU/CUDA runtime probes for optional PyTorch requests without changing the default package list.
+- Add optional PyTorch CPU/CUDA selection to both installer menus, with configuration backups and runtime backend checks.
 
 ## 0.1.0 Development Release — preparation, 2026-11-17
 

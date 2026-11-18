@@ -17,7 +17,7 @@ The Windows OpenCV 5.1.0 test used HDF5 1.14.6. With that runtime the HDF5 2.2.0
 - There is one active per-user configuration per platform, not independent root profiles.
 - Removing a request does not automatically uninstall its package. No Synchronize, package ownership or pending-retirement feature is included.
 - Legacy native package-history restrictions may produce a solver conflict. Such conflicts stop; they are not bypassed by guessing old user intent.
-- Optional PyTorch is requested explicitly through the package configuration. CPU and CUDA checks run with the selected build. Native installation and CUDA acceptance on the supported platforms are pending.
+- Optional PyTorch is requested through **Optional packages** or the advanced configuration. CPU and CUDA checks run with the selected build. Native installation and CUDA acceptance on the supported platforms are pending. Niobium’s CPU plan resolved with Python 3.14. Micromamba 2.10.0 detected the NVIDIA driver but could not resolve CUDA builds requiring the [GPU architecture virtual package](https://github.com/conda/ceps/blob/main/cep-0046.md). This failure stops before package approval or installation.
 - Bleach/tinycss2 selection depends on the full solver result and upstream metadata. There is no new permanent Bleach or tinycss2 pin.
 
 ## Transaction boundaries

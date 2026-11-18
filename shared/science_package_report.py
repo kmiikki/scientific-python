@@ -30,15 +30,38 @@ def coverage(configuration,defaults,records,import_checks=()):
 
 
 PYTORCH_REQUESTS = frozenset({'pytorch', 'pytorch-cpu', 'pytorch-gpu'})
+PYTORCH_BUILD_ATTRIBUTE = re.compile(
+    r'''(?:\[|,)\s*build\s*=\s*(?P<quote>['"]?)(?P<build>[\w.*+-]+)(?P=quote)\s*(?=[,\]])'''
+)
+PYTORCH_POSITIONAL_BUILD = re.compile(r'^(?:[^\s]+::)?pytorch(?:==?[\w.*+!-]+=|\s+[^\s\[]+\s+)([\w.*+-]+)\s*$', re.I)
 
 
-def pytorch_probe(requested):
+def pytorch_backend(specs):
+    # Describe the request independently of what is installed.
+    backends = set()
+    for spec in specs:
+        name = package_name(spec)
+        if name in ('pytorch-cpu', 'pytorch-gpu'):
+            backends.add('cpu' if name == 'pytorch-cpu' else 'cuda')
+        elif name == 'pytorch':
+            attr = PYTORCH_BUILD_ATTRIBUTE.search(spec)
+            positional = PYTORCH_POSITIONAL_BUILD.search(spec)
+            build = attr['build'] if attr else positional[1] if positional else ''
+            backends.add(next((backend for backend in ('cpu', 'cuda') if build.startswith(backend)), 'automatic'))
+    if len(backends) > 1:
+        backends.discard('automatic')
+    if len(backends) > 1:
+        return 'conflicting'
+    return next(iter(backends), 'none')
+
+
+def pytorch_probe(requested, backend=None):
     """Verify the actual backend when the user explicitly requests PyTorch."""
     if not PYTORCH_REQUESTS.intersection(requested):
         return None
     import torch
 
-    if 'pytorch-cpu' in requested and torch.version.cuda is not None:
+    if (backend == 'cpu' or 'pytorch-cpu' in requested) and torch.version.cuda is not None:
         raise RuntimeError('The requested CPU-only PyTorch is a CUDA build.')
     matrix = torch.tensor([[1.0, 2.0], [3.0, 4.0]], device='cpu', requires_grad=True)
     product = matrix @ matrix
@@ -50,7 +73,7 @@ def pytorch_probe(requested):
         raise RuntimeError('PyTorch CPU autograd failed.')
 
     available = torch.cuda.is_available()
-    if 'pytorch-gpu' in requested and not available:
+    if (backend == 'cuda' or 'pytorch-gpu' in requested) and not available:
         raise RuntimeError('PyTorch cannot access a compatible NVIDIA CUDA device.')
     report = {'version': str(torch.__version__), 'backend': 'cpu',
               'compiled_cuda': torch.version.cuda, 'cuda_available': available,

@@ -13,6 +13,7 @@
 # Persistent user configuration and receipts never belong in source control.
 **/science-release.json
 **/science-release.legacy-*.json
+**/science-release.optional-*.json
 **/science-config-origins.json
 .env
 .env.*

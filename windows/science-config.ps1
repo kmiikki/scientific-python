@@ -270,3 +270,143 @@ function Update-ScienceReleasePackages {
     Write-Host 'Approved release requests added to configuration. The package transaction still requires separate approval.'
     return $candidate
 }
+
+function Get-SciencePyTorchBackend {
+    param([string[]]$Packages)
+    $backends=@(foreach($spec in $Packages) {
+        switch (Get-ScienceSpecName $spec) {
+            'pytorch-cpu' {'cpu'}
+            'pytorch-gpu' {'cuda'}
+            'pytorch' {
+                $build=[regex]::Match($spec,'(?:\[|,)\s*build\s*=\s*(?<quote>[''"]?)(?<build>[\w.*+-]+)\k<quote>\s*(?=[,\]])')
+                if(-not $build.Success){
+                    $build=[regex]::Match($spec,'(?i)^(?:[^\s]+::)?pytorch(?:==?[\w.*+!-]+=|\s+[^\s\[]+\s+)(?<build>[\w.*+-]+)\s*$')
+                }
+                $value=$build.Groups['build'].Value
+                if($value.StartsWith('cpu',[StringComparison]::Ordinal)){'cpu'}
+                elseif($value.StartsWith('cuda',[StringComparison]::Ordinal)){'cuda'}
+                else{'automatic'}
+            }
+        }
+    })
+    $explicit=@($backends|Where-Object {$_ -cne 'automatic'}|Select-Object -Unique)
+    if($explicit.Count -gt 1){return 'conflicting'}
+    if($explicit.Count){return $explicit[0]}
+    if($backends.Count){return 'automatic'}
+    return 'none'
+}
+
+function Test-ScienceNvidiaDevice {
+    $nvidia=Get-Command nvidia-smi.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if(-not $nvidia){return $false}
+    try {
+        $devices=& $nvidia.Source -L
+        return ($LASTEXITCODE -eq 0 -and [bool]($devices -match '^GPU \d+:'))
+    } catch {return $false}
+}
+
+function Set-SciencePyTorchRequest {
+    param([ValidateSet('cpu','cuda','remove')][string]$Choice,
+          [string]$Path=(Get-ScienceConfigurationPath),[byte[]]$ExpectedBytes=$null)
+    Assert-ScienceRegularPath $Path
+    $original=[IO.File]::ReadAllBytes($Path)
+    $fingerprint=[Convert]::ToBase64String($original)
+    $value=Assert-ScienceConfiguration (Read-ScienceJson $Path)
+    if(($null -ne $ExpectedBytes -and [Convert]::ToBase64String($ExpectedBytes) -cne $fingerprint) -or
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($Path)) -cne $fingerprint){
+        throw 'Configuration changed during review; start again.'
+    }
+    $packages=@($value.ScientificPackages)
+    $torchNames=@('pytorch','pytorch-cpu','pytorch-gpu')
+    $torchSpecs=@($packages|Where-Object {$torchNames -ccontains (Get-ScienceSpecName $_)})
+    if($Choice -ceq 'remove'){
+        if(-not $torchSpecs.Count){return}
+        $packages=@($packages|Where-Object {$torchSpecs -cnotcontains $_})
+    } else {
+        if((Get-SciencePyTorchBackend $torchSpecs) -ceq $Choice){return}
+        if(@($torchSpecs|Where-Object {(Get-ScienceSpecName $_) -cne 'pytorch'}).Count){
+            throw 'Remove the previous PyTorch add-on request before selecting a different backend.'
+        }
+        $build=$Choice+'*'
+        if(-not $torchSpecs.Count){
+            $packages+="pytorch[build='$build']"
+        } else {
+            $spec=$torchSpecs[0]
+            $match=[regex]::Match($spec,'(?:\[|,)\s*build\s*=\s*(?<quote>[''"]?)(?<build>[\w.*+-]+)\k<quote>\s*(?=[,\]])')
+            $oldBuild=$match.Groups['build']
+            if($match.Success -and $oldBuild.Value -cin @('cpu*','cuda*')){
+                $chosen=$spec.Substring(0,$oldBuild.Index)+$build+$spec.Substring($oldBuild.Index+$oldBuild.Length)
+            } elseif($match.Success -or $spec -cmatch '(?:\[|,)\s*build\s*=' -or
+                $spec -cmatch '(?i)^(?:[^\s]+::)?pytorch(?:==?[\w.*+!-]+=|\s+[^\s\[]+\s+)([\w.*+-]+)\s*$'){
+                throw 'The PyTorch request has an explicit build constraint. Review it before switching backends.'
+            } elseif($spec.EndsWith(']')) {
+                $chosen=$spec.Substring(0,$spec.Length-1)+",build='$build']"
+            } else {
+                $chosen=$spec+"[build='$build']"
+            }
+            $packages=@($packages|ForEach-Object {if($_ -ceq $spec){$chosen}else{$_}})
+        }
+    }
+    $candidate=[pscustomobject]@{SchemaVersion=$value.SchemaVersion;Channels=@($value.Channels);ScientificPackages=$packages}
+    $null=Assert-ScienceConfiguration $candidate
+    Assert-ScienceWorkflowConfiguration $candidate
+
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try {$digest=[BitConverter]::ToString($sha.ComputeHash($original)).Replace('-','').ToLowerInvariant()}
+    finally {$sha.Dispose()}
+    $backup=Join-Path (Split-Path -Parent $Path) ('science-release.optional-'+$digest+'.json')
+    if(Test-Path -LiteralPath $backup){
+        Assert-ScienceRegularPath $backup
+        if([Convert]::ToBase64String([IO.File]::ReadAllBytes($backup)) -cne $fingerprint){
+            throw "Optional-package backup collision: $backup"
+        }
+    } else {
+        Set-ScienceConfigBytes -Path $backup -Bytes $original
+    }
+    $bytes=(New-Object Text.UTF8Encoding($false)).GetBytes(($candidate|ConvertTo-Json -Depth 32)+[Environment]::NewLine)
+    Set-ScienceConfigBytes -Path $Path -Bytes $bytes -ExpectedBytes $original
+    return $backup
+}
+
+function Select-ScienceOptionalPackages {
+    if(-not (Test-ScienceInteractiveConfiguration)){throw 'Optional package selection requires an interactive console.'}
+    $path=Get-ScienceConfigurationPath
+    Assert-ScienceRegularPath $path
+    $original=[IO.File]::ReadAllBytes($path)
+    $value=Assert-ScienceConfiguration (Read-ScienceJson $path)
+    if([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) -cne [Convert]::ToBase64String($original)){
+        throw 'Configuration changed while reading; start again.'
+    }
+    $backend=Get-SciencePyTorchBackend $value.ScientificPackages
+    $cudaAvailable=Test-ScienceNvidiaDevice
+    Write-Host 'Optional packages'
+    Write-Host ('Configured PyTorch backend: '+$backend.ToUpperInvariant())
+    Write-Host ('NVIDIA CUDA device: '+$(if($cudaAvailable){'detected; compatibility will be checked by the solver'}else{'unavailable'}))
+    Write-Host '1  PyTorch CPU'
+    Write-Host '2  PyTorch NVIDIA CUDA'
+    Write-Host 'R  Remove the PyTorch request'
+    Write-Host 'Q  Back'
+    while($true) {
+        $choice=(Read-Host 'Optional packages').Trim().ToLowerInvariant()
+        if(-not $choice -or $choice -eq 'q'){return $false}
+        if($choice -eq '2' -and -not $cudaAvailable){
+            Write-Host 'CUDA requires a working NVIDIA driver and a detectable GPU.'
+            continue
+        }
+        if($choice -in @('1','2','r')){break}
+        Write-Host 'Unknown selection.'
+    }
+    if($choice -eq 'r' -and (Read-Host 'Remove the configuration request only? [y/N]').Trim() -notmatch '^(?i:y|yes)$'){
+        return $false
+    }
+    $selected=@{'1'='cpu';'2'='cuda';'r'='remove'}[$choice]
+    $backup=Set-SciencePyTorchRequest -Choice $selected -Path $path -ExpectedBytes $original
+    if($backup){Write-Host ('Previous package configuration saved to '+$backup)}
+    if($selected -eq 'remove'){
+        Write-Host 'PyTorch is no longer requested. Installed packages were preserved.'
+        return $false
+    }
+    Write-Host ('Configured PyTorch backend: '+$selected.ToUpperInvariant())
+    Write-Host 'Continuing to Install/update for the package transaction review.'
+    return $true
+}

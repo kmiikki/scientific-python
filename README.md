@@ -80,7 +80,7 @@ The usual environment location is `%USERPROFILE%\micromamba\envs\science`. An al
 
 The [complete default configuration](shared/science-release.default.json) contains all 42 direct requests. Windows uses an FFmpeg minimum of 9.0.1; Ubuntu uses 9.0.2. Additional dependencies are resolved automatically.
 
-**Optional additions:** Choose [PyTorch CPU or CUDA](docs/configuration.md#optional-pytorch) through the installer configuration. Torchvision, LightGBM and Pingouin can also be requested. Native PyTorch installation and CUDA acceptance are pending.
+**Optional additions:** Choose [PyTorch CPU or CUDA](docs/configuration.md#optional-pytorch) with **O — Optional packages** in either installer. Torchvision, LightGBM and Pingouin can also be requested. Native PyTorch installation and CUDA acceptance are pending.
 
 ## ⚙️ Configuration
 

@@ -1,0 +1,226 @@
+[CmdletBinding()]
+param([string]$TempRoot=[IO.Path]::GetTempPath())
+$ErrorActionPreference='Stop'
+$root=Split-Path -Parent $PSScriptRoot
+$work=Join-Path $TempRoot ('science-optional-tests-'+[Guid]::NewGuid().ToString('N'))
+$previousLocalAppData=$env:LOCALAPPDATA
+$env:LOCALAPPDATA=Join-Path $work 'local'
+[void][IO.Directory]::CreateDirectory($env:LOCALAPPDATA)
+. (Join-Path $root 'windows/science-release.ps1')
+. (Join-Path $root 'windows/science-update.ps1')
+
+$fixture=@{Answers=$null;Cuda=$false;Interactive=$true;Steps=@();Passed=0}
+function Test-ScienceInteractiveConfiguration {return $fixture.Interactive}
+function Test-ScienceNvidiaDevice {return $fixture.Cuda}
+function Read-Host {return $fixture.Answers.Dequeue()}
+function Check {
+    param([bool]$Condition,[string]$Message)
+    if(-not $Condition){throw $Message}
+}
+function Reject {
+    param([scriptblock]$Operation,[string]$Pattern)
+    $message=''
+    try {$null=& $Operation}catch{$message=$_.Exception.Message}
+    Check ($message -match $Pattern) "Expected a rejection matching '$Pattern'; received '$message'."
+}
+function Put-Json {
+    param([string]$Path,$Value)
+    Set-ScienceConfigBytes $Path ([Text.Encoding]::UTF8.GetBytes(($Value|ConvertTo-Json -Depth 16)))
+}
+function Answers {
+    param([string[]]$Value)
+    $fixture.Answers=New-Object 'Collections.Generic.Queue[string]'
+    foreach($answer in $Value){$fixture.Answers.Enqueue($answer)}
+}
+function Case {
+    param([string]$Name,[scriptblock]$Body)
+    $fixture.Cuda=$false
+    $fixture.Interactive=$true
+    Put-Json $path (Get-ScienceDefaultConfiguration)
+    & $Body
+    $fixture.Passed++
+    Write-Host "PASS $Name"
+}
+try {
+    $path=Get-ScienceConfigurationPath
+    Case 'cpu-selection-saves-exact-backup-and-repeat-is-noop' {
+        $before=Get-ScienceFileSha256 $path
+        $value=Read-ScienceJson $path
+        Answers @('1')
+        Check (Select-ScienceOptionalPackages) 'CPU selection did not continue to install.'
+        $withCpu=Read-ScienceJson $path
+        Check ($withCpu.ScientificPackages[-1] -ceq "pytorch[build='cpu*']") 'CPU build constraint is missing.'
+        Check (($withCpu.ScientificPackages[0..($value.ScientificPackages.Count-1)] -join '|') -ceq ($value.ScientificPackages -join '|')) 'Other requests changed.'
+        $backup=Join-Path (Split-Path -Parent $path) "science-release.optional-$before.json"
+        Check ((Get-ScienceFileSha256 $backup) -ceq $before) 'Backup differs from the original configuration.'
+        $timestamp=[IO.File]::GetLastWriteTimeUtc($path)
+        Answers @('1')
+        Check (Select-ScienceOptionalPackages) 'Repeated CPU selection did not continue.'
+        Check ([IO.File]::GetLastWriteTimeUtc($path) -eq $timestamp) 'Repeated CPU selection rewrote configuration.'
+    }
+    Case 'cuda-switch-preserves-version-channel-and-other-requests' {
+        $value=Read-ScienceJson $path
+        $value.Channels+=@('my-lab')
+        $value.ScientificPackages+=@('my-lab::package=1','conda-forge::pytorch>=2.13,<=2.14','torchvision')
+        Put-Json $path $value
+        Answers @('1')
+        Check (Select-ScienceOptionalPackages) 'CPU selection failed.'
+        $fixture.Cuda=$true
+        Answers @('2')
+        Check (Select-ScienceOptionalPackages) 'CUDA selection failed.'
+        $after=Read-ScienceJson $path
+        Check (($after.Channels -join '|') -ceq ($value.Channels -join '|')) 'Channels changed.'
+        Check ($after.ScientificPackages[-2] -ceq "conda-forge::pytorch>=2.13,<=2.14[build='cuda*']") 'PyTorch version constraint changed.'
+        Check ($after.ScientificPackages[-1] -ceq 'torchvision') 'Other optional request changed.'
+        Check ((Get-SciencePyTorchBackend $after.ScientificPackages) -ceq 'cuda') 'Selected CUDA backend was not detected.'
+    }
+    Case 'unavailable-cuda-back-and-noninteractive-preserve-the-configuration' {
+        $before=Get-ScienceFileSha256 $path
+        Answers @('2','q')
+        Check (-not (Select-ScienceOptionalPackages)) 'Unavailable CUDA entered install.'
+        $fixture.Interactive=$false
+        Reject {Select-ScienceOptionalPackages} 'interactive console'
+        Check ((Get-ScienceFileSha256 $path) -ceq $before) 'Unavailable CUDA or redirected input changed configuration.'
+    }
+    Case 'remove-request-only-with-confirmation' {
+        $value=Read-ScienceJson $path
+        $value.ScientificPackages+=@("pytorch[build='cpu*']", 'torchvision=1')
+        Put-Json $path $value
+        $before=Get-ScienceFileSha256 $path
+        Answers @('r','')
+        Check (-not (Select-ScienceOptionalPackages)) 'Removal decline entered install.'
+        Check ((Get-ScienceFileSha256 $path) -ceq $before) 'Declined removal changed configuration.'
+        Answers @('r','y')
+        Check (-not (Select-ScienceOptionalPackages)) 'Configuration removal entered install.'
+        $after=Read-ScienceJson $path
+        Check ((Get-SciencePyTorchBackend $after.ScientificPackages) -ceq 'none') 'PyTorch request remains.'
+        Check ($after.ScientificPackages[-1] -ceq 'torchvision=1') 'Torchvision request changed.'
+    }
+    Case 'pinned-build-and-stale-configuration-are-preserved' {
+        $value=Read-ScienceJson $path
+        $value.ScientificPackages+=@("pytorch[version='2.13.0',build='cpu_mkl_py314_0']")
+        Put-Json $path $value
+        $before=Get-ScienceFileSha256 $path
+        $fixture.Cuda=$true
+        Answers @('2')
+        Reject {Select-ScienceOptionalPackages} 'explicit build constraint'
+        Reject {Set-SciencePyTorchRequest -Choice cpu -ExpectedBytes ([byte[]]@(1,2,3))} 'changed during review'
+        Check ((Get-ScienceFileSha256 $path) -ceq $before) 'Pinned or stale requests were overwritten.'
+    }
+    Case 'normal-menu-dispatches-cpu-to-install-and-removal-back-to-menu' {
+        $menu=Join-Path $root 'windows/00-menu.ps1'
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($menu,[ref]$tokens,[ref]$errors)
+        Check (-not $errors.Count) 'Menu did not parse.'
+        $dispatch=$ast.Find({param($node) $node -is [Management.Automation.Language.SwitchStatementAst]},$true)
+        $stepper=[scriptblock]::Create('foreach($iteration in @(1)) {'+[Environment]::NewLine+$dispatch.Extent.Text+[Environment]::NewLine+'}')
+        function Select-ScienceInstallLayout {return [pscustomobject]@{Mode='Home';Root=(Join-Path $work 'mamba')}}
+        function Initialize-ScienceConfiguration {}
+        function Show-OtherInstallationSummary {}
+        function Pause-Menu {}
+        function Invoke-Step {
+            param($ScriptName,$ExtraCommand)
+            $fixture.Steps+=("$ScriptName $ExtraCommand")
+            return 0
+        }
+        $Mode='Auto'
+        $choice='O'
+        $fixture.Steps=@()
+        Answers @('1')
+        & $stepper
+        Check ($fixture.Steps.Count -eq 2) 'Optional CPU selection did not run the standard installer.'
+        Check ($fixture.Steps[0] -match '01-prepare-windows.ps1' -and $fixture.Steps[1] -match '02-install-science.ps1.*-SkipReleaseDefaultOffer') 'Optional selection bypassed the standard installer.'
+        $fixture.Steps=@()
+        Answers @('r','y')
+        & $stepper
+        Check (-not $fixture.Steps.Count) 'Removing the request launched the installer.'
+    }
+    Case 'solver-rejects-opposite-build-before-approval' {
+        $packages=@('python','python_abi','spyder','apache-arrow-proc','opencv','ffmpeg',"pytorch[build='cpu*']")
+        $before=@{
+            'python'=@{version='3.14.10'}; 'python_abi'=@{build='0_cp314'}
+            'spyder'=@{version='6.1.8'}; 'apache-arrow-proc'=@{build='cpu'}
+            'opencv'=@{version='5.1.0';build='qt6_test'}; 'ffmpeg'=@{version='9.0.2';build='gpl_test'}
+        }
+        $plan=[pscustomobject]@{success=$true;actions=@{LINK=@(@{name='pytorch';build='cuda129_mkl_py314_0'})}}
+        $floors=@{opencv='5.1.0';ffmpeg='9.0.1'}
+        Reject {Assert-SciencePlan $plan $before $floors $packages} 'requested PyTorch backend'
+        $plan.actions.LINK[0].build='cpu_mkl_py314_0'
+        Check ((Assert-SciencePlan $plan $before $floors $packages)['pytorch'].build -ceq 'cpu_mkl_py314_0') 'Valid CPU build rejected.'
+    }
+
+    Case 'unchanged-cpu-plan-does-not-request-package-approval' {
+        Answers @('1')
+        Check (Select-ScienceOptionalPackages) 'CPU selection did not continue.'
+        $mamba=Join-Path $work 'current-root'
+        $prefix=Join-Path $mamba 'envs/science'
+        $meta=Join-Path $prefix 'conda-meta'
+        [void][IO.Directory]::CreateDirectory($meta)
+        $layout=[pscustomobject]@{
+            Root=$mamba; Science=$prefix; Pkgs=(Join-Path $mamba 'pkgs')
+            Tmp=(Join-Path $mamba 'tmp'); Micromamba=(Join-Path $mamba 'fake-native')
+        }
+        [IO.File]::WriteAllText($layout.Micromamba,'Inert test data')
+        $policy=Get-ScienceEffectiveRelease
+        $policy.ScientificPackages=@('python','python_abi','spyder','apache-arrow-proc','opencv','ffmpeg',"pytorch[build='cpu*']")
+        $policy.MicromambaSha256=Get-ScienceFileSha256 $layout.Micromamba
+        $rows=@(
+            @('python','3.14.10','0'), @('python_abi','3.14','0_cp314'), @('spyder','6.1.8','0'),
+            @('apache-arrow-proc','20.0.0','cpu'), @('opencv','5.1.0','qt6_test'), @('ffmpeg','9.0.2','gpl_test'),
+            @('pytorch','2.13.0','cpu_mkl_py314_0')
+        )
+        foreach($row in $rows){
+            $name,$version,$build=$row
+            $filename="$name-$version-$build.conda"
+            Put-Json (Join-Path $meta ($name+'.json')) @{
+                name=$name; version=$version; build=$build; subdir='win-64'
+                sha256=('a'*64); url="https://conda.anaconda.org/conda-forge/win-64/$filename"; fn=$filename
+            }
+        }
+        $before=Get-SciencePrefixDigest $prefix
+        $script:ScienceRelease=$policy
+        $calls=@{Native=0}
+        function Get-ScienceEffectiveRelease {return $policy}
+        function Assert-ScienceNotInUse {}
+        function Confirm-ScienceTransaction {throw 'No-op must not request package approval.'}
+        function Invoke-ScienceNative {
+            param($Executable,$Arguments,$Environment)
+            $calls.Native++
+            Check ($Arguments[0] -ceq 'update' -and $Arguments -ccontains '--dry-run' -and
+                   $Arguments -ccontains "pytorch[build='cpu*']") 'Unexpected native command.'
+            return @{ExitCode=0;Stdout='{"success":true}';Stderr=''}
+        }
+        Invoke-ScienceEnvironmentSync $layout $policy.ScientificPackages
+        Check ($calls.Native -eq 1) 'No-op attempted native execution beyond the solver.'
+        Check ((Get-SciencePrefixDigest $prefix) -ceq $before) 'No-op rewrote package metadata.'
+
+        Answers @('2')
+        $fixture.Cuda=$true
+        Check (Select-ScienceOptionalPackages) 'CUDA selection did not continue.'
+        $policy.ScientificPackages[-1]="pytorch[build='cuda*']"
+        function Invoke-ScienceNative {
+            param($Executable,$Arguments,$Environment)
+            $calls.Native++
+            Check ($Arguments[0] -ceq 'info') 'A solver started without a detected CUDA virtual package.'
+            return @{ExitCode=0;Stdout='{"virtual packages": ["__win=0=0"]}';Stderr=''}
+        }
+        Reject {Invoke-ScienceEnvironmentSync $layout $policy.ScientificPackages} 'did not detect a compatible CUDA driver'
+        Check ((Get-SciencePrefixDigest $prefix) -ceq $before) 'Unsupported CUDA rewrote metadata.'
+
+        function Invoke-ScienceNative {
+            param($Executable,$Arguments,$Environment)
+            if($Arguments[0] -ceq 'info'){
+                return @{ExitCode=0;Stdout='{"virtual packages":["__cuda=12.9=0"]}';Stderr=''}
+            }
+            Check ($Arguments -ccontains '--dry-run') 'An incompatible CUDA plan reached mutation.'
+            return @{ExitCode=1;Stdout='{"solver_problems":["nothing provides __cuda_arch"]}';Stderr=''}
+        }
+        Reject {Invoke-ScienceEnvironmentSync $layout $policy.ScientificPackages} 'GPU architecture dependency'
+        Check ((Get-SciencePrefixDigest $prefix) -ceq $before) 'CUDA solver failure rewrote metadata.'
+
+    }
+    Write-Host ('RESULT tests='+$fixture.Passed+' failed=0')
+} finally {
+    $env:LOCALAPPDATA=$previousLocalAppData
+    Remove-Item -LiteralPath $work -Force -Recurse
+}

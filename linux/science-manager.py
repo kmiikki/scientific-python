@@ -173,6 +173,14 @@ def check_plan(plan, before, config, explicit=None):
         raise InstallError('Ordinary GIL CPython ABI is required.')
     if after['apache-arrow-proc'].get('build', after['apache-arrow-proc'].get('build_string')) != 'cpu':
         raise InstallError('CPU Arrow is required.')
+    torch_backend = science_config.pytorch_backend(config['ScientificPackages'])
+    if torch_backend == 'conflicting':
+        raise InstallError('The PyTorch requests specify conflicting backends.')
+    if torch_backend in ('cpu', 'cuda'):
+        torch = after.get('pytorch', {})
+        build = torch.get('build', torch.get('build_string', ''))
+        if not build.startswith(torch_backend):
+            raise InstallError('The solver did not select the requested PyTorch backend: ' + torch_backend.upper())
     truly_removed = removed - set(links)
     protected = (set(before) if explicit is None else explicit) - required
     blocked = truly_removed & protected
@@ -535,6 +543,26 @@ def restore_approved_metadata(lock, prefix):
     return restored
 
 
+def has_nvidia_device(runner=None, env=None):
+    nvidia_smi = shutil.which('nvidia-smi')
+    if not nvidia_smi:
+        return False
+    try:
+        devices = (runner or run_process)([nvidia_smi, '-L'], env=env, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return devices.returncode == 0 and bool(re.search(r'^GPU \d+:', devices.stdout, re.MULTILINE))
+
+
+def require_micromamba_cuda(mm, root, runner, env):
+    info = runner([mm, 'info', '--no-rc', '-r', root, '--json'], env=env, timeout=30)
+    if info.returncode:
+        raise InstallError('Could not verify CUDA compatibility in Micromamba.')
+    devices = json.loads(info.stdout).get('virtual packages', [])
+    if not any(re.fullmatch(r'__cuda=[1-9]\d*(?:\.\d+)*=0', device) for device in devices):
+        raise InstallError('Micromamba did not detect a compatible CUDA driver for dependency solving.')
+
+
 def sync(root, config, runner=run_process, home=None, mm=None, existing=False, reviewer=None, progress=None, fetch=None):
     root = guard_root(root, home, existing=existing)
     guard_science(root)
@@ -558,17 +586,13 @@ def sync(root, config, runner=run_process, home=None, mm=None, existing=False, r
         previous_requests = history_specs(prefix)
         intent = (set(before) if previous_requests is None else previous_requests) | {spec_name(s) for s in specs(config)}
         requested = specs(config, before)
-        names = {spec_name(spec) for spec in requested}
-        if 'pytorch-gpu' in names:
-            nvidia_smi = shutil.which('nvidia-smi')
-            if not nvidia_smi:
-                raise InstallError('The requested CUDA PyTorch build requires a working NVIDIA driver.')
-            devices = runner([nvidia_smi, '-L'], env=env, timeout=15)
-            if devices.returncode or not re.search(r'^GPU \d+:', devices.stdout, re.MULTILINE):
-                raise InstallError('NVIDIA device discovery failed before solving the CUDA PyTorch request.')
-            print('PyTorch backend requested: CUDA. Micromamba will solve against the detected driver.', flush=True)
-        elif 'pytorch-cpu' in names:
-            print('PyTorch backend requested: CPU.', flush=True)
+        torch_backend = science_config.pytorch_backend(requested)
+        if torch_backend == 'cuda':
+            if not has_nvidia_device(runner=runner, env=env):
+                raise InstallError('PyTorch CUDA requires a working NVIDIA driver and a detectable GPU.')
+            require_micromamba_cuda(mm, root, runner, env)
+        if torch_backend in ('cpu', 'cuda'):
+            print('PyTorch backend requested: ' + torch_backend.upper() + '.', flush=True)
         command = 'update' if before else 'create'
         argv = [mm, command, '--no-rc', '-r', root, '-p', prefix, '--override-channels', *[arg for channel in config['Channels'] for arg in ['-c', channel]],
                 '--strict-channel-priority', '--no-pyc', '--json']
@@ -580,6 +604,8 @@ def sync(root, config, runner=run_process, home=None, mm=None, existing=False, r
         if result.returncode:
             write_json(root / '.science-attempt.json', {'status': 'preflight_failed', 'exit_code': result.returncode, 'package_changes_started': False})
             print(result.stdout, end=''); print(result.stderr, file=sys.stderr, end='')
+            if torch_backend == 'cuda' and '__cuda_arch' in (result.stdout + result.stderr):
+                raise InstallError('Micromamba could not satisfy the CUDA GPU architecture dependency (__cuda_arch). No package changes started.')
             raise InstallError('Dependency solve failed before package changes. Incompatible extra packages or version pins must be resolved; OpenCV/FFmpeg limits are unchanged.')
         if result.stderr: print(result.stderr, file=sys.stderr, end='')
         plan = parse_plan(result.stdout)
@@ -596,6 +622,10 @@ def sync(root, config, runner=run_process, home=None, mm=None, existing=False, r
             old = before.get(name, {}).get('version', 'not installed')
             new = after[name]
             print('{}: {} -> {} ({})'.format(name, old, new['version'], new.get('build', new.get('build_string'))), flush=True)
+        if torch_backend in ('cpu', 'cuda'):
+            torch = after['pytorch']
+            print('PyTorch {}: {} ({})'.format(torch_backend.upper(), torch['version'],
+                  torch.get('build', torch.get('build_string'))), flush=True)
         removed = {r['name'] for r in changes['UNLINK']} - {r['name'] for r in changes['LINK']}
         if removed:
             print('Obsolete dependency removals in the validated plan: ' + ', '.join(sorted(removed)), flush=True)

@@ -50,6 +50,14 @@ function Assert-SciencePlan {
         $name=Get-ScienceSpecName $spec $script:ScienceRelease.Channels
         if (-not $after.ContainsKey($name)) { throw "Incomplete solution: missing $name before package changes." }
     }
+    $torchBackend=Get-SciencePyTorchBackend $Packages
+    if($torchBackend -ceq 'conflicting'){throw 'The PyTorch requests specify conflicting backends.'}
+    if($torchBackend -cin @('cpu','cuda')){
+        $build=[string]$after['pytorch'].build
+        if(-not $build.StartsWith($torchBackend,[StringComparison]::Ordinal)){
+            throw ('The solver did not select the requested PyTorch backend: '+$torchBackend.ToUpperInvariant())
+        }
+    }
     return $after
 }
 function Invoke-ScienceNative {
@@ -126,8 +134,12 @@ function Invoke-ScienceMambaJson {
     $envMap=@{MAMBA_ROOT_PREFIX=$Layout.Root;CONDA_PKGS_DIRS=$Layout.Pkgs;TEMP=$Layout.Tmp;TMP=$Layout.Tmp;Path=((Join-Path $Layout.Science 'Library\bin')+';'+$env:Path)}
     $result=Invoke-ScienceNative -Executable $Layout.Micromamba -Arguments $Arguments -Environment $envMap
     $reason=$null
-    if ($result.ExitCode -ne 0) {$reason='Micromamba transaction/solve failed'}
-    else {
+    if ($result.ExitCode -ne 0) {
+        $reason='Micromamba transaction/solve failed'
+        if($Arguments -ccontains '--dry-run' -and ($result.Stdout+$result.Stderr) -cmatch '__cuda_arch'){
+            $reason='Micromamba could not satisfy the CUDA GPU architecture dependency (__cuda_arch)'
+        }
+    } else {
         try { $plan=[regex]::Match($result.Stdout,'(?s)\{.*\}').Value | ConvertFrom-Json -ErrorAction Stop }
         catch {$reason='Micromamba did not return valid transaction JSON'}
         if(-not $reason -and -not $plan.success){$reason='Micromamba did not report success'}
@@ -338,6 +350,21 @@ function Invoke-ScienceEnvironmentSync {
     $effective=Get-ScienceEffectiveRelease
     if(($Packages -join "`n") -cne ($effective.ScientificPackages -join "`n")){throw 'Package requests differ from the active JSON.'}
     $script:ScienceRelease=$effective
+    $torchBackend=Get-SciencePyTorchBackend $Packages
+    if($torchBackend -ceq 'cuda'){
+        if(-not (Test-ScienceNvidiaDevice)){
+            throw 'PyTorch CUDA requires a working NVIDIA driver and a detectable GPU.'
+        }
+        $info=Invoke-ScienceNative $Layout.Micromamba @('info','--no-rc','-r',$Layout.Root,'--json') @{MAMBA_ROOT_PREFIX=$Layout.Root;CONDA_PKGS_DIRS=$Layout.Pkgs}
+        if($info.ExitCode -ne 0){throw 'Could not verify CUDA compatibility in Micromamba.'}
+        $virtual=(ConvertFrom-ScienceTransactionJson $info.Stdout).'virtual packages'
+        if(-not ($virtual -cmatch '^__cuda=[1-9]\d*(?:\.\d+)*=0$')){
+            throw 'Micromamba did not detect a compatible CUDA driver for dependency solving.'
+        }
+    }
+    if($torchBackend -cin @('cpu','cuda')){
+        Write-Host ('PyTorch backend requested: '+$torchBackend.ToUpperInvariant()+'.')
+    }
     $exclusive=$null
     try {
         $lockPath=Join-Path $Layout.Root '.science-update.lock'
@@ -402,25 +429,17 @@ function Invoke-ScienceEnvironmentSync {
         $before=Get-ScienceRecords $Layout.Science;$floors=Get-ScienceMediaFloors $before
         $isInstalled=[IO.Directory]::Exists((Join-Path $Layout.Science 'conda-meta'))
         if([IO.Directory]::Exists($Layout.Science) -and -not $isInstalled){throw 'Existing Science directory has no package metadata; preserve it and investigate.'}
-        $requests=@($Packages|ForEach-Object {Get-ScienceSpecName $_})
-        if($requests -ccontains 'pytorch-gpu'){
-            $nvidia=Get-Command nvidia-smi.exe -CommandType Application -ErrorAction SilentlyContinue
-            if(-not $nvidia){throw 'The requested CUDA PyTorch build requires a working NVIDIA driver.'}
-            $gpu=& $nvidia.Source -L
-            if($LASTEXITCODE -ne 0 -or -not ($gpu -match '^GPU \d+:')){
-                throw 'NVIDIA device discovery failed before solving the CUDA PyTorch request.'
-            }
-            Write-Host 'PyTorch backend requested: CUDA. Micromamba will solve against the detected driver.'
-        } elseif($requests -ccontains 'pytorch-cpu'){
-            Write-Host 'PyTorch backend requested: CPU.'
-        }
         $verb=if($isInstalled){'update'}else{'create'}
         $arguments=@($verb,'-p',$Layout.Science,'-r',$Layout.Root)+@(Get-ScienceChannelArguments $effective)+@('--no-shortcuts','--no-pyc','--json','--dry-run')
         if($isInstalled){$arguments+='--all'}
         $arguments+=@($Packages)+@("opencv>=$($floors.opencv)","ffmpeg>=$($floors.ffmpeg)")
         Write-Host 'Solving the complete environment before approval...'
         $plan=Invoke-ScienceMambaJson $Layout $arguments
-        $null=Assert-SciencePlan $plan $before $floors $Packages
+        $after=Assert-SciencePlan $plan $before $floors $Packages
+        if($torchBackend -cin @('cpu','cuda')){
+            $torch=$after['pytorch']
+            Write-Host ("PyTorch {0}: {1} ({2})" -f $torchBackend.ToUpperInvariant(),$torch.version,$torch.build)
+        }
         if((Get-ScienceFileSha256 $configPath) -cne $initialConfigHash){throw 'Configuration changed during planning; start again.'}
         if(-not @(@($plan.actions.LINK)+@($plan.actions.UNLINK)|Where-Object {$null -ne $_}).Count){
             Repair-ScienceInstalledSources $Layout $before @($effective.Channels) $configPath $initialConfigHash

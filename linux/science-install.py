@@ -491,9 +491,50 @@ def summary(mode, root, mm, status, runtime, launchers, shortcut, log, report, p
     print('Diagnostic report   : ' + str(report))
 
 
+def select_optional_packages(reader=None, output=print):
+    reader = reader or input
+    config = m.science_config
+    path = config.active_path()
+    original = m.safety.read_regular(path)[0]
+    value = config.validate(config.read_json(path), BUNDLE)
+    if m.safety.read_regular(path)[0] != original:
+        raise config.ConfigError('Configuration changed while reading; start again.')
+    backend = config.pytorch_backend(value['ScientificPackages'])
+    cuda_available = m.has_nvidia_device()
+    output('Optional packages')
+    output('Configured PyTorch backend: ' + backend.upper())
+    output('NVIDIA CUDA device: ' + ('detected; compatibility will be checked by the solver' if cuda_available else 'unavailable'))
+    output('1  PyTorch CPU')
+    output('2  PyTorch NVIDIA CUDA')
+    output('R  Remove the PyTorch request')
+    output('Q  Back')
+    while True:
+        choice = ask('Optional packages: ', 'q', reader).lower()
+        if choice in ('1', '2', 'r', 'q'):
+            if choice == '2' and not cuda_available:
+                output('CUDA requires a working NVIDIA driver and a detectable GPU.')
+                continue
+            break
+        output('Unknown selection.')
+    if choice == 'q':
+        return False
+    if choice == 'r' and ask('Remove the configuration request only? [y/N]: ', 'n', reader).lower() not in ('y', 'yes'):
+        return False
+    selection = {'1': 'cpu', '2': 'cuda', 'r': 'remove'}[choice]
+    backup = config.choose_pytorch_request(BUNDLE, selection, path, expected=original)
+    if backup:
+        output('Previous package configuration saved to ' + str(backup))
+    if selection == 'remove':
+        output('PyTorch is no longer requested. Installed packages were preserved.')
+        return False
+    output('Configured PyTorch backend: ' + selection.upper())
+    output('Continuing to Install/update for the package transaction review.')
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', nargs='?', default='install', choices=['install', 'validate', 'diagnostics', 'remove-science', 'remove-root', 'remove-settings', 'info'])
+    parser.add_argument('action', nargs='?', default='install', choices=['install', 'optional', 'validate', 'diagnostics', 'remove-science', 'remove-root', 'remove-settings', 'info'])
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     m.verify_bundle()
@@ -508,13 +549,19 @@ def main():
         print('Bash activation detected: ' + str(detected['bash_activation']))
         return 0
     if args.action != 'diagnostics': m.platform_guard()
+    if args.action == 'optional' and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise m.InstallError('Optional package selection requires an interactive terminal.')
     step(1, 'PASS')
     mode, root, mm = select(home, manage_science=args.action not in ['diagnostics', 'validate', 'remove-settings', 'remove-science', 'remove-root']); step(2, 'PASS')
-    if args.action in ['install', 'validate']:
+    if args.action in ['install', 'optional', 'validate']:
         try:
             m.science_config.initialize(BUNDLE, root=root)
             if args.action == 'install':
                 m.science_config.offer_release_packages(BUNDLE,interactive=sys.stdin.isatty() and sys.stdout.isatty())
+            elif args.action == 'optional':
+                if not select_optional_packages():
+                    return 0
+                args.action = 'install'
             config = m.release()
             m.science_config.require_workflow(config)
             print('Package configuration: ' + str(m.science_config.active_path()))

@@ -81,7 +81,8 @@ def checks(prefix=None, gui=False, camera=None):
     records=package_records(prefix)
     torch_requests = _package_report.PYTORCH_REQUESTS & _names
     if torch_requests:
-        torch_report = check('pytorch_backend', lambda: _package_report.pytorch_probe(torch_requests))
+        backend = _package_report.pytorch_backend(_user['ScientificPackages'])
+        torch_report = check('pytorch_backend', lambda: _package_report.pytorch_probe(torch_requests, backend))
         if torch_report is not None:
             result['optional']['pytorch'] = torch_report
         imports.extend({'package': name, 'module': 'torch', 'status': result['checks']['pytorch_backend']['status']}
