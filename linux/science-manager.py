@@ -554,13 +554,87 @@ def has_nvidia_device(runner=None, env=None):
     return devices.returncode == 0 and bool(re.search(r'^GPU \d+:', devices.stdout, re.MULTILINE))
 
 
-def require_micromamba_cuda(mm, root, runner, env):
-    info = runner([mm, 'info', '--no-rc', '-r', root, '--json'], env=env, timeout=30)
-    if info.returncode:
-        raise InstallError('Could not verify CUDA compatibility in Micromamba.')
-    devices = json.loads(info.stdout).get('virtual packages', [])
-    if not any(re.fullmatch(r'__cuda=[1-9]\d*(?:\.\d+)*=0', device) for device in devices):
-        raise InstallError('Micromamba did not detect a compatible CUDA driver for dependency solving.')
+def cuda_solver_settings(mm, root, runner, env):
+    nvidia_smi = shutil.which('nvidia-smi')
+    if not nvidia_smi:
+        raise InstallError('PyTorch CUDA requires nvidia-smi and a working NVIDIA driver.')
+    driver = runner([nvidia_smi, '--query', '-u', '-x'], env=env, timeout=15)
+    devices = runner([nvidia_smi, '--query-gpu=compute_cap', '--format=csv,noheader'], env=env, timeout=15)
+    versions = re.findall(r'<cuda_version>\s*([1-9]\d*\.\d+)\s*</cuda_version>', driver.stdout)
+    releases = re.findall(r'<driver_version>\s*([1-9]\d*(?:\.\d+){1,3})\s*</driver_version>', driver.stdout)
+    capabilities = devices.stdout.strip().splitlines()
+    if (driver.returncode or devices.returncode or len(versions) != 1 or len(releases) != 1 or not capabilities or
+            any(not re.fullmatch(r'[1-9]\d*\.\d+', item.strip()) for item in capabilities)):
+        raise InstallError('The NVIDIA driver capability and GPU compute capability could not be verified.')
+    driver_version = versions[0]
+    gpu_arch = min((item.strip() for item in capabilities), key=version)
+
+    def virtual_packages(overrides):
+        info = runner([mm, 'info', '--no-rc', '-r', root, '--json'], env=env | overrides, timeout=30)
+        if info.returncode:
+            raise InstallError('Could not verify CUDA compatibility in Micromamba.')
+        rows = json.loads(info.stdout).get('virtual packages', [])
+        result = {}
+        for row in rows:
+            match = re.fullmatch(r'(__cuda|__cuda_arch)=([1-9]\d*\.\d+)=0', row)
+            if match:
+                if match[1] in result:
+                    raise InstallError('Micromamba reported ambiguous CUDA virtual packages.')
+                result[match[1]] = match[2]
+        return result
+
+    native = virtual_packages({})
+    overrides = {}
+    if native.get('__cuda') != driver_version:
+        overrides['CONDA_OVERRIDE_CUDA'] = driver_version
+    if native.get('__cuda_arch') != gpu_arch:
+        if '__cuda_arch' in native:
+            raise InstallError('Micromamba GPU architecture disagrees with the detected hardware.')
+        overrides['CONDA_OVERRIDE_CUDA_ARCH'] = gpu_arch
+    if overrides:
+        verified = virtual_packages(overrides)
+        if verified.get('__cuda') != driver_version:
+            raise InstallError('Micromamba could not verify the NVIDIA driver CUDA capability.')
+        if '__cuda_arch' not in verified:
+            overrides.pop('CONDA_OVERRIDE_CUDA_ARCH', None)
+            print('Micromamba lacks __cuda_arch. The selected cuda-arch package minimum will be checked against the GPU.',
+                  flush=True)
+        elif verified['__cuda_arch'] != gpu_arch:
+            raise InstallError('Micromamba returned a CUDA architecture different from the verified hardware.')
+    major, minor = map(int, driver_version.split('.'))
+    print(f'NVIDIA driver CUDA {driver_version}; minimum detected GPU compute capability {gpu_arch}.', flush=True)
+    if overrides:
+        print('Using verified hardware values in Micromamba subprocesses: ' +
+              ', '.join(f'{key}={value}' for key, value in overrides.items()), flush=True)
+    # NVIDIA documents CUDA 13 minor compatibility for R580 and newer.
+    minor_limit = '14' if major == 13 and version(releases[0])[0] >= 580 else None
+    return {'driver': driver_version, 'architecture': gpu_arch, 'runtime_limit': f'{major}.{minor + 1}',
+            'minor_limit': minor_limit, 'overrides': overrides}
+
+
+def assert_cuda_solution(after, settings):
+    runtime = after.get('cuda-version', {})
+    toolkit = runtime.get('version')
+    minimum = after.get('cuda-arch', {}).get('version')
+    if not minimum or version(minimum) > version(settings['architecture']):
+        raise InstallError('The planned CUDA packages lack a verified compatible GPU compute capability.')
+    if not toolkit:
+        raise InstallError('The planned CUDA packages lack a runtime version record.')
+    if version(toolkit) < version(settings['runtime_limit']):
+        return False
+    if (not settings['minor_limit'] or version(toolkit) >= version(settings['minor_limit']) or
+            not re.fullmatch(r'https://conda\.anaconda\.org/conda-forge/(?:linux-64|noarch)/cuda-version-[^/?#]+',
+                             runtime.get('url', '')) or '__cuda >=13' not in runtime.get('constrains', [])):
+        raise InstallError('The planned CUDA runtime exceeds the verified driver capability.')
+    return True
+
+
+def cuda_runtime_conflict(result):
+    try:
+        problems = json.loads(result.stdout).get('solver_problems', [])
+    except (ValueError, AttributeError):
+        return False
+    return any(re.search(r'\bcuda-version\b', str(problem)) for problem in problems)
 
 
 def sync(root, config, runner=run_process, home=None, mm=None, existing=False, reviewer=None, progress=None, fetch=None):
@@ -587,10 +661,15 @@ def sync(root, config, runner=run_process, home=None, mm=None, existing=False, r
         intent = (set(before) if previous_requests is None else previous_requests) | {spec_name(s) for s in specs(config)}
         requested = specs(config, before)
         torch_backend = science_config.pytorch_backend(requested)
+        cuda = None
+        cuda_retry = None
         if torch_backend == 'cuda':
-            if not has_nvidia_device(runner=runner, env=env):
-                raise InstallError('PyTorch CUDA requires a working NVIDIA driver and a detectable GPU.')
-            require_micromamba_cuda(mm, root, runner, env)
+            cuda = cuda_solver_settings(mm, root, runner, env)
+            env.update(cuda['overrides'])
+            if not any(spec_name(spec) == 'cuda-version' for spec in requested):
+                requested.append('cuda-version<' + cuda['runtime_limit'])
+                if cuda['minor_limit']:
+                    cuda_retry = 'cuda-version<' + cuda['minor_limit']
         if torch_backend in ('cpu', 'cuda'):
             print('PyTorch backend requested: ' + torch_backend.upper() + '.', flush=True)
         command = 'update' if before else 'create'
@@ -601,15 +680,28 @@ def sync(root, config, runner=run_process, home=None, mm=None, existing=False, r
         argv += requested
         write_json(root / '.science-attempt.json', {'status': 'preflight', 'package_changes_started': False})
         result = runner(argv + ['--dry-run'], env=env)
+        if result.returncode and cuda_retry and cuda_runtime_conflict(result):
+            print('Checking CUDA 13 minor-version compatibility with the same scientific package constraints.', flush=True)
+            result = runner(argv[:-1] + [cuda_retry, '--dry-run'], env=env)
         if result.returncode:
             write_json(root / '.science-attempt.json', {'status': 'preflight_failed', 'exit_code': result.returncode, 'package_changes_started': False})
             print(result.stdout, end=''); print(result.stderr, file=sys.stderr, end='')
             if torch_backend == 'cuda' and '__cuda_arch' in (result.stdout + result.stderr):
-                raise InstallError('Micromamba could not satisfy the CUDA GPU architecture dependency (__cuda_arch). No package changes started.')
+                raise InstallError('Micromamba could not satisfy __cuda_arch for the available packages. Use a verified Micromamba release with CEP 46 support or a compatible conda-forge CUDA build. No package changes started.')
             raise InstallError('Dependency solve failed before package changes. Incompatible extra packages or version pins must be resolved; OpenCV/FFmpeg limits are unchanged.')
         if result.stderr: print(result.stderr, file=sys.stderr, end='')
         plan = parse_plan(result.stdout)
         after = check_plan(plan, before, config, history_specs(prefix))
+        if cuda:
+            minor_compatibility = assert_cuda_solution(after, cuda)
+            plan['cuda_compatibility'] = {'driver': cuda['driver'], 'gpu_compute_capability': cuda['architecture'],
+                                          'runtime': after['cuda-version']['version'],
+                                          'minimum_compute_capability': after['cuda-arch']['version'],
+                                          'minor_version_compatibility': minor_compatibility}
+            if minor_compatibility:
+                print(f"CUDA {after['cuda-version']['version']} uses NVIDIA minor-version compatibility with "
+                      f"driver CUDA {cuda['driver']}. New driver features and PTX JIT can require a newer driver. "
+                      "Review this limitation before approving; GPU execution is checked after installation.", flush=True)
         actions = plan.get('actions') or {}
         tx.indexed(after.values())
         changes = {key: [public_record(r) for r in actions.get(key, [])] for key in ['LINK', 'UNLINK']}

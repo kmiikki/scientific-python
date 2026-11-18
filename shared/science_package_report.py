@@ -80,8 +80,11 @@ def pytorch_probe(requested, backend=None):
               'cpu_matrix_multiplication': True, 'autograd': True}
     if available:
         gpu = matrix.detach().to('cuda')
-        if (gpu @ gpu).cpu().tolist() != expected:
+        gpu_product = gpu @ gpu
+        torch.cuda.synchronize(gpu.device)
+        if gpu_product.cpu().tolist() != expected:
             raise RuntimeError('PyTorch CUDA computation or transfer failed.')
-        report.update(backend='cuda', compute_capability=list(torch.cuda.get_device_capability()),
-                      cuda_matrix_multiplication=True, cpu_gpu_transfers=True)
+        report.update(backend='cuda', device_name=torch.cuda.get_device_name(gpu.device),
+                      compute_capability=list(torch.cuda.get_device_capability(gpu.device)),
+                      cuda_matrix_multiplication=True, cpu_gpu_transfers=True, cuda_synchronized=True)
     return report

@@ -198,26 +198,74 @@ try {
         $fixture.Cuda=$true
         Check (Select-ScienceOptionalPackages) 'CUDA selection did not continue.'
         $policy.ScientificPackages[-1]="pytorch[build='cuda*']"
+        function Get-ScienceNvidiaCudaHardware {
+            return [pscustomobject]@{Driver='13.2';Architecture='12.0';DriverRelease='595.99.02'}
+        }
         function Invoke-ScienceNative {
             param($Executable,$Arguments,$Environment)
             $calls.Native++
             Check ($Arguments[0] -ceq 'info') 'A solver started without a detected CUDA virtual package.'
             return @{ExitCode=0;Stdout='{"virtual packages": ["__win=0=0"]}';Stderr=''}
         }
-        Reject {Invoke-ScienceEnvironmentSync $layout $policy.ScientificPackages} 'did not detect a compatible CUDA driver'
+        Reject {Invoke-ScienceEnvironmentSync $layout $policy.ScientificPackages} 'could not verify the NVIDIA driver'
         Check ((Get-SciencePrefixDigest $prefix) -ceq $before) 'Unsupported CUDA rewrote metadata.'
 
         function Invoke-ScienceNative {
             param($Executable,$Arguments,$Environment)
             if($Arguments[0] -ceq 'info'){
-                return @{ExitCode=0;Stdout='{"virtual packages":["__cuda=12.9=0"]}';Stderr=''}
+                return @{ExitCode=0;Stdout='{"virtual packages":["__cuda=13.2=0"]}';Stderr=''}
             }
             Check ($Arguments -ccontains '--dry-run') 'An incompatible CUDA plan reached mutation.'
             return @{ExitCode=1;Stdout='{"solver_problems":["nothing provides __cuda_arch"]}';Stderr=''}
         }
-        Reject {Invoke-ScienceEnvironmentSync $layout $policy.ScientificPackages} 'GPU architecture dependency'
+        Reject {Invoke-ScienceEnvironmentSync $layout $policy.ScientificPackages} '__cuda_arch'
         Check ((Get-SciencePrefixDigest $prefix) -ceq $before) 'CUDA solver failure rewrote metadata.'
 
+    }
+    Case 'cuda-probes-verified-overrides-and-rejects-hardware-mismatch' {
+        $fixture.Seen=@()
+        $fixture.Architecture='12.0'
+        function Get-ScienceNvidiaCudaHardware {
+            return [pscustomobject]@{Driver='13.2';Architecture='12.0';DriverRelease='595.99.02'}
+        }
+        function Get-ScienceCudaVirtualPackages {
+            param($Layout,[hashtable]$Overrides=@{})
+            $fixture.Seen+=@($Overrides.Clone())
+            if(-not $Overrides.Count){return @{'__cuda'='12.9'}}
+            return @{'__cuda'='13.2';'__cuda_arch'=$fixture.Architecture}
+        }
+        $settings=Get-ScienceCudaSolverSettings @{}
+        Check ($settings.Overrides['CONDA_OVERRIDE_CUDA'] -ceq '13.2' -and
+               $settings.Overrides['CONDA_OVERRIDE_CUDA_ARCH'] -ceq '12.0') 'Verified subprocess overrides missing.'
+        Check ($fixture.Seen[0].Count -eq 0) 'Initial probe received an override.'
+        $fixture.Architecture='12.1'
+        Reject {Get-ScienceCudaSolverSettings @{}} 'different from the verified hardware'
+    }
+    Case 'cuda-same-major-retry-and-hardware-validation' {
+        $cuda=[pscustomobject]@{Architecture='12.0';RuntimeLimit='13.3';MinorLimit='14.0'}
+        $cap=@{'cuda-arch'=@{version='7.5'}; 'cuda-version'=@{
+            version='13.5';url='https://conda.anaconda.org/conda-forge/noarch/cuda-version-fixture.conda'
+            constrains=@('__cuda >=13')
+        }}
+        Check (Assert-ScienceCudaSolution $cap $cuda) 'Official minor-version compatibility was not recognized.'
+        $cap['cuda-arch'].version='12.1'
+        Reject {Assert-ScienceCudaSolution $cap $cuda} 'GPU compute capability'
+        $cap['cuda-arch'].version='7.5'
+        $cap['cuda-version'].version='14.0'
+        Reject {Assert-ScienceCudaSolution $cap $cuda} 'exceeds the verified driver'
+        $fixture.Solves=0
+        function Invoke-ScienceNative {
+            param($Executable,$Arguments,$Environment)
+            Check ($Environment['CONDA_OVERRIDE_CUDA'] -ceq '13.2') 'Verified driver was not scoped to solver.'
+            $fixture.Solves++
+            if($fixture.Solves -eq 1){return @{ExitCode=1;Stdout='{"solver_problems":["requires cuda-version >=13.4"]}';Stderr=''}}
+            Check ($Arguments -ccontains 'cuda-version<14') 'Retry did not retain the major-version limit.'
+            return @{ExitCode=0;Stdout='{"success":true}';Stderr=''}
+        }
+        $layout=[pscustomobject]@{Root=$work;Science=(Join-Path $work 'envs/science');Pkgs=$work;Tmp=$work;Micromamba='fixture'}
+        $retry=@('update','--dry-run','cuda-version<14')
+        $plan=Invoke-ScienceMambaJson $layout @('update','--dry-run','cuda-version<13.3') -CudaOverrides @{CONDA_OVERRIDE_CUDA='13.2'} -CudaRetryArguments $retry
+        Check ($plan.success -and $fixture.Solves -eq 2) 'Expected one targeted retry.'
     }
     Write-Host ('RESULT tests='+$fixture.Passed+' failed=0')
 } finally {

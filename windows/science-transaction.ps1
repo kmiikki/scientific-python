@@ -319,7 +319,7 @@ function ConvertFrom-ScienceTransactionJson {
     return $value
 }
 function Invoke-ScienceLockedTransaction {
-    param($Layout,$Lock,[string]$Directory,[string]$ConfigPath,[string]$ExpectedLockDigest,[scriptblock]$BeforeCommit={})
+    param($Layout,$Lock,[string]$Directory,[string]$ConfigPath,[string]$ExpectedLockDigest,[scriptblock]$BeforeCommit={},[hashtable]$CudaOverrides=@{})
     if($ExpectedLockDigest -cnotmatch '^[0-9a-f]{64}$' -or (Get-ScienceTextDigest ($Lock|ConvertTo-Json -Depth 64 -Compress)) -cne $ExpectedLockDigest){throw 'Approved identity changed before execution.'}
     if([IO.Path]::GetFullPath($Layout.Science) -cne [IO.Path]::GetFullPath($Lock.prefix)){throw 'Execution target differs from approved prefix.'}
     $finalNames=@($Lock.after|ForEach-Object {$_.name})
@@ -334,6 +334,7 @@ function Invoke-ScienceLockedTransaction {
     $inputs=New-ScienceLockedInputs $Lock $Directory
     $privateCache=Join-Path $Directory 'cache';[void][IO.Directory]::CreateDirectory($privateCache)
     $environment=@{MAMBA_ROOT_PREFIX=$Layout.Root;CONDA_PKGS_DIRS=$privateCache;CONDA_SUBDIR='win-64';TEMP=$Layout.Tmp;TMP=$Layout.Tmp;TMPDIR=$Layout.Tmp;MAMBA_SAFETY_CHECKS='enabled';MAMBA_EXTRA_SAFETY_CHECKS='true'}
+    foreach($name in $CudaOverrides.Keys){$environment[$name]=$CudaOverrides[$name]}
     $guard={
         if((Get-ScienceFileSha256 $lockPath) -cne $lockHash -or (Get-ScienceTextDigest ($Lock|ConvertTo-Json -Depth 64 -Compress)) -cne $memoryHash){throw 'Approved lock changed after approval.'}
         if((Get-ScienceFileSha256 $ConfigPath) -cne $Lock.config_sha256){throw 'Active configuration changed after approval.'}

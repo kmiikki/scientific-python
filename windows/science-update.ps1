@@ -130,14 +130,25 @@ function Save-ScienceMambaFailure {
     return $directory
 }
 function Invoke-ScienceMambaJson {
-    param($Layout,[string[]]$Arguments)
+    param($Layout,[string[]]$Arguments,[hashtable]$CudaOverrides=@{},[string[]]$CudaRetryArguments=@())
     $envMap=@{MAMBA_ROOT_PREFIX=$Layout.Root;CONDA_PKGS_DIRS=$Layout.Pkgs;TEMP=$Layout.Tmp;TMP=$Layout.Tmp;Path=((Join-Path $Layout.Science 'Library\bin')+';'+$env:Path)}
+    foreach($name in $CudaOverrides.Keys){$envMap[$name]=$CudaOverrides[$name]}
     $result=Invoke-ScienceNative -Executable $Layout.Micromamba -Arguments $Arguments -Environment $envMap
+    if($result.ExitCode -ne 0 -and $CudaRetryArguments.Count){
+        $conflicts=@()
+        try {$conflicts=@((ConvertFrom-ScienceTransactionJson $result.Stdout).solver_problems)}
+        catch {}
+        if($conflicts -match '\bcuda-version\b'){
+            Write-Host 'Checking CUDA 13 minor-version compatibility with the same scientific package constraints.'
+            $Arguments=$CudaRetryArguments
+            $result=Invoke-ScienceNative -Executable $Layout.Micromamba -Arguments $Arguments -Environment $envMap
+        }
+    }
     $reason=$null
     if ($result.ExitCode -ne 0) {
         $reason='Micromamba transaction/solve failed'
         if($Arguments -ccontains '--dry-run' -and ($result.Stdout+$result.Stderr) -cmatch '__cuda_arch'){
-            $reason='Micromamba could not satisfy the CUDA GPU architecture dependency (__cuda_arch)'
+            $reason='Micromamba could not satisfy __cuda_arch for the available packages. Use a verified Micromamba release with CEP 46 support or a compatible conda-forge CUDA build'
         }
     } else {
         try { $plan=[regex]::Match($result.Stdout,'(?s)\{.*\}').Value | ConvertFrom-Json -ErrorAction Stop }
@@ -222,7 +233,7 @@ function Confirm-ScienceDependencyRemovals {
     return ((Read-Host 'Remove exactly these dependency packages? [y/N]').Trim() -match '^(?i:y|yes)$')
 }
 function Invoke-ScienceReviewedTransaction {
-    param($Layout,$Before,$Plan,[string]$ConfigPath,[string[]]$RepairNames=@(),[scriptblock]$OnCommit)
+    param($Layout,$Before,$Plan,[string]$ConfigPath,[string[]]$RepairNames=@(),[scriptblock]$OnCommit,[hashtable]$CudaOverrides=@{})
     if(-not (Test-ScienceInteractiveConfiguration)){throw 'Non-interactive package transactions are not permitted.'}
     $removals=@(Get-ScienceRemovalCandidates $Before $Plan $Layout.Science)
     if($removals.Count -and -not (Confirm-ScienceDependencyRemovals $removals $Before)){throw 'Dependency removals cancelled; no package transaction was started.'}
@@ -248,7 +259,7 @@ function Invoke-ScienceReviewedTransaction {
             $context.Guard=Start-ScienceGtkGuard $Layout $Before
             if($OnCommit){& $OnCommit}
         }
-        $null=Invoke-ScienceLockedTransaction $Layout $lock $directory $ConfigPath $identity $callback
+        $null=Invoke-ScienceLockedTransaction $Layout $lock $directory $ConfigPath $identity $callback -CudaOverrides $CudaOverrides
     } finally {Stop-ScienceGtkGuard $context.Guard $Layout}
     Update-SciencePixbufCache $Layout
 }
@@ -337,6 +348,92 @@ function Repair-ScienceInstalledSources {
         }
     }
 }
+function Get-ScienceNvidiaCudaHardware {
+    $nvidia=Get-Command nvidia-smi.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if(-not $nvidia){throw 'PyTorch CUDA requires nvidia-smi and a working NVIDIA driver.'}
+    $driver=Invoke-ScienceNative $nvidia.Source @('--query','-u','-x')
+    $devices=Invoke-ScienceNative $nvidia.Source @('--query-gpu=compute_cap','--format=csv,noheader')
+    $versionMatches=[regex]::Matches($driver.Stdout,'<cuda_version>\s*([1-9]\d*\.\d+)\s*</cuda_version>')
+    $releaseMatches=[regex]::Matches($driver.Stdout,'<driver_version>\s*([1-9]\d*(?:\.\d+){1,3})\s*</driver_version>')
+    $capabilities=@($devices.Stdout.Trim() -split '\r?\n' | ForEach-Object {$_.Trim()})
+    if($driver.ExitCode -ne 0 -or $devices.ExitCode -ne 0 -or $versionMatches.Count -ne 1 -or $releaseMatches.Count -ne 1 -or
+        -not $capabilities.Count -or @($capabilities|Where-Object {$_ -cnotmatch '^[1-9]\d*\.\d+$'}).Count){
+        throw 'The NVIDIA driver capability and GPU compute capability could not be verified.'
+    }
+    $architecture=$capabilities|Sort-Object {[version]$_}|Select-Object -First 1
+    return [pscustomobject]@{
+        Driver=$versionMatches[0].Groups[1].Value;Architecture=$architecture
+        DriverRelease=$releaseMatches[0].Groups[1].Value
+    }
+}
+function Get-ScienceCudaVirtualPackages {
+    param($Layout,[hashtable]$Overrides=@{})
+    $environment=@{MAMBA_ROOT_PREFIX=$Layout.Root;CONDA_PKGS_DIRS=$Layout.Pkgs}
+    foreach($name in $Overrides.Keys){$environment[$name]=$Overrides[$name]}
+    $info=Invoke-ScienceNative $Layout.Micromamba @('info','--no-rc','-r',$Layout.Root,'--json') $environment
+    if($info.ExitCode -ne 0){throw 'Could not verify CUDA compatibility in Micromamba.'}
+    $result=@{}
+    foreach($row in (ConvertFrom-ScienceTransactionJson $info.Stdout).'virtual packages'){
+        if($row -cmatch '^(__cuda|__cuda_arch)=([1-9]\d*\.\d+)=0$'){
+            $name=$Matches[1]
+            if($result.ContainsKey($name)){throw 'Micromamba reported ambiguous CUDA virtual packages.'}
+            $result[$name]=$Matches[2]
+        }
+    }
+    return $result
+}
+function Get-ScienceCudaSolverSettings {
+    param($Layout)
+    $hardware=Get-ScienceNvidiaCudaHardware
+    $driver=$hardware.Driver
+    $architecture=$hardware.Architecture
+    $native=Get-ScienceCudaVirtualPackages $Layout
+    $overrides=@{}
+    if($native['__cuda'] -cne $driver){$overrides['CONDA_OVERRIDE_CUDA']=$driver}
+    if($native['__cuda_arch'] -cne $architecture){
+        if($native.ContainsKey('__cuda_arch')){throw 'Micromamba GPU architecture disagrees with the detected hardware.'}
+        $overrides['CONDA_OVERRIDE_CUDA_ARCH']=$architecture
+    }
+    if($overrides.Count){
+        $verified=Get-ScienceCudaVirtualPackages $Layout $overrides
+        if($verified['__cuda'] -cne $driver){throw 'Micromamba could not verify the NVIDIA driver CUDA capability.'}
+        if(-not $verified.ContainsKey('__cuda_arch')){
+            $overrides.Remove('CONDA_OVERRIDE_CUDA_ARCH')
+            Write-Host 'Micromamba lacks __cuda_arch. The selected cuda-arch package minimum will be checked against the GPU.'
+        }
+        elseif($verified['__cuda_arch'] -cne $architecture){
+            throw 'Micromamba returned a CUDA architecture different from the verified hardware.'
+        }
+    }
+    $driverVersion=[version]$driver
+    # NVIDIA documents CUDA 13 minor compatibility for R580 and newer.
+    $minorLimit=if($driverVersion.Major -eq 13 -and ([version]$hardware.DriverRelease).Major -ge 580){'14.0'}else{$null}
+    Write-Host "NVIDIA driver CUDA $driver; minimum detected GPU compute capability $architecture."
+    if($overrides.Count){
+        $detail=@($overrides.Keys|Sort-Object|ForEach-Object {"$_=$($overrides[$_])"}) -join ', '
+        Write-Host "Using verified hardware values in Micromamba subprocesses: $detail"
+    }
+    return [pscustomobject]@{
+        Driver=$driver;Architecture=$architecture
+        RuntimeLimit="$($driverVersion.Major).$($driverVersion.Minor+1)";MinorLimit=$minorLimit;Overrides=$overrides
+    }
+}
+function Assert-ScienceCudaSolution {
+    param($After,$Cuda)
+    $runtime=$After['cuda-version']
+    $minimum=$After['cuda-arch'].version
+    if(-not $minimum -or (ConvertTo-ScienceVersion $minimum) -gt (ConvertTo-ScienceVersion $Cuda.Architecture)){
+        throw 'The planned CUDA packages lack a verified compatible GPU compute capability.'
+    }
+    if(-not $runtime.version){throw 'The planned CUDA packages lack a runtime version record.'}
+    if((ConvertTo-ScienceVersion $runtime.version) -lt (ConvertTo-ScienceVersion $Cuda.RuntimeLimit)){return $false}
+    if(-not $Cuda.MinorLimit -or (ConvertTo-ScienceVersion $runtime.version) -ge (ConvertTo-ScienceVersion $Cuda.MinorLimit) -or
+        $runtime.url -cnotmatch '^https://conda\.anaconda\.org/conda-forge/(?:win-64|noarch)/cuda-version-[^/?#]+$' -or
+        $runtime.constrains -cnotcontains '__cuda >=13'){
+        throw 'The planned CUDA runtime exceeds the verified driver capability.'
+    }
+    return $true
+}
 function Invoke-ScienceEnvironmentSync {
     param($Layout,[string[]]$Packages,[scriptblock]$AfterSync)
     if(-not $Layout -or -not $Layout.Root -or -not $Layout.Science -or -not $Layout.Micromamba){throw 'A verified installation layout is required.'}
@@ -351,16 +448,11 @@ function Invoke-ScienceEnvironmentSync {
     if(($Packages -join "`n") -cne ($effective.ScientificPackages -join "`n")){throw 'Package requests differ from the active JSON.'}
     $script:ScienceRelease=$effective
     $torchBackend=Get-SciencePyTorchBackend $Packages
+    $cuda=$null
+    $cudaArgs=@{}
     if($torchBackend -ceq 'cuda'){
-        if(-not (Test-ScienceNvidiaDevice)){
-            throw 'PyTorch CUDA requires a working NVIDIA driver and a detectable GPU.'
-        }
-        $info=Invoke-ScienceNative $Layout.Micromamba @('info','--no-rc','-r',$Layout.Root,'--json') @{MAMBA_ROOT_PREFIX=$Layout.Root;CONDA_PKGS_DIRS=$Layout.Pkgs}
-        if($info.ExitCode -ne 0){throw 'Could not verify CUDA compatibility in Micromamba.'}
-        $virtual=(ConvertFrom-ScienceTransactionJson $info.Stdout).'virtual packages'
-        if(-not ($virtual -cmatch '^__cuda=[1-9]\d*(?:\.\d+)*=0$')){
-            throw 'Micromamba did not detect a compatible CUDA driver for dependency solving.'
-        }
+        $cuda=Get-ScienceCudaSolverSettings $Layout
+        if($cuda.Overrides.Count){$cudaArgs['CudaOverrides']=$cuda.Overrides}
     }
     if($torchBackend -cin @('cpu','cuda')){
         Write-Host ('PyTorch backend requested: '+$torchBackend.ToUpperInvariant()+'.')
@@ -395,6 +487,7 @@ function Invoke-ScienceEnvironmentSync {
                             throw 'Approved recovery inputs changed.'
                         }
                         Repair-ScienceInstalledSources $Layout $before @($effective.Channels) $configPath $initialConfigHash
+                        if($cuda){$null=Assert-ScienceCudaSolution (Get-ScienceRecords $Layout.Science) $cuda}
                         Update-SciencePixbufCache $Layout
                         & $AfterSync $state $evidence
                         return
@@ -424,7 +517,7 @@ function Invoke-ScienceEnvironmentSync {
             } finally {if([IO.File]::Exists($repairFile)){[IO.File]::Delete($repairFile)}}
             $null=Assert-SciencePlan $repair $before $floors @('opencv','ffmpeg',$name)
             if((Get-ScienceFileSha256 $configPath) -cne $initialConfigHash){throw 'Configuration changed during planning; start again.'}
-            Invoke-ScienceReviewedTransaction $Layout $before $repair $configPath @($name) -OnCommit $onCommit
+            Invoke-ScienceReviewedTransaction $Layout $before $repair $configPath @($name) -OnCommit $onCommit @cudaArgs
         }
         $before=Get-ScienceRecords $Layout.Science;$floors=Get-ScienceMediaFloors $before
         $isInstalled=[IO.Directory]::Exists((Join-Path $Layout.Science 'conda-meta'))
@@ -434,8 +527,24 @@ function Invoke-ScienceEnvironmentSync {
         if($isInstalled){$arguments+='--all'}
         $arguments+=@($Packages)+@("opencv>=$($floors.opencv)","ffmpeg>=$($floors.ffmpeg)")
         Write-Host 'Solving the complete environment before approval...'
-        $plan=Invoke-ScienceMambaJson $Layout $arguments
+        $solveArgs=$cudaArgs.Clone()
+        $solveArguments=$arguments
+        if($cuda -and @($Packages|Where-Object {(Get-ScienceSpecName $_) -ceq 'cuda-version'}).Count -eq 0){
+            if($cuda.MinorLimit){$solveArgs['CudaRetryArguments']=$arguments+@("cuda-version<$($cuda.MinorLimit)")}
+            $solveArguments+="cuda-version<$($cuda.RuntimeLimit)"
+        }
+        $plan=Invoke-ScienceMambaJson $Layout $solveArguments @solveArgs
         $after=Assert-SciencePlan $plan $before $floors $Packages
+        if($cuda){
+            $minor=Assert-ScienceCudaSolution $after $cuda
+            $plan|Add-Member -NotePropertyName cuda_compatibility -NotePropertyValue ([ordered]@{
+                driver=$cuda.Driver;gpu_compute_capability=$cuda.Architecture;runtime=$after['cuda-version'].version
+                minimum_compute_capability=$after['cuda-arch'].version;minor_version_compatibility=$minor
+            })
+            if($minor){
+                Write-Host ("CUDA {0} uses NVIDIA minor-version compatibility with driver CUDA {1}. New driver features and PTX JIT can require a newer driver. Review this limitation before approving; GPU execution is checked after installation." -f $after['cuda-version'].version,$cuda.Driver)
+            }
+        }
         if($torchBackend -cin @('cpu','cuda')){
             $torch=$after['pytorch']
             Write-Host ("PyTorch {0}: {1} ({2})" -f $torchBackend.ToUpperInvariant(),$torch.version,$torch.build)
@@ -457,7 +566,7 @@ function Invoke-ScienceEnvironmentSync {
             Write-Host 'The environment already satisfies the resolved requests.'
             return
         }
-        Invoke-ScienceReviewedTransaction $Layout $before $plan $configPath -OnCommit $onCommit
+        Invoke-ScienceReviewedTransaction $Layout $before $plan $configPath -OnCommit $onCommit @cudaArgs
         $null=Assert-SciencePlan ([pscustomobject]@{success=$true;actions=$null}) (Get-ScienceRecords $Layout.Science) $floors $Packages
         Write-Host 'Approved package identities and GTK cache checks passed.'
         if($AfterSync){& $AfterSync $state $null}
