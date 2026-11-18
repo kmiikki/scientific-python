@@ -31,7 +31,13 @@ Each list item requests one package. Examples of individual items:
 
 Add `"pingouin"` as another comma-separated item to request it. Replace an existing `"numpy"` item when adding its version restriction; do not keep both. Removing `"seaborn"` stops requesting it. Seaborn, Xarray, Statsmodels, Numba and SymPy are already included in new defaults.
 
-PyTorch, torchvision, LightGBM and Pingouin are optional. Bare `"pytorch"` leaves variant selection to the solver. `torchvision` can bring PyTorch as a dependency. GPU availability and compatibility are not guaranteed by this release.
+### Optional PyTorch
+
+Add one PyTorch request to your active package list. Use `"pytorch-cpu"` for a CPU build, or `"pytorch-gpu"` for a CUDA build with a working NVIDIA driver. Add a version constraint such as `"pytorch-cpu=2.13.0"` to select a version. The solver checks available builds against Python 3.14, the existing environment and the detected CUDA capability. The plain `"pytorch"` request lets the solver select the build.
+
+Run **Install/update**, review the proposed additions, replacements, removals and downgrades, and approve the package transaction if the plan is acceptable. The runtime report records the selected backend and verifies matrix multiplication and autograd on CPU. For a working CUDA build it also checks the device capability, GPU matrix multiplication and CPU–GPU transfers. CUDA acceptance on the target machines is pending.
+
+Torchvision, LightGBM and Pingouin are also optional. Torchvision can bring PyTorch as a dependency.
 
 Keep valid JSON: double-quoted strings, commas between items and no trailing comma or comments. Duplicate package names and conflicting repeated requests are rejected. The installer accepts named Conda MatchSpecs; Micromamba performs final dependency and MatchSpec semantic validation.
 
@@ -39,7 +45,7 @@ The current workflow requires six compatible foundation requests: `python`, `pyt
 
 ## What removing a request means
 
-Install/update does not automatically remove an installed package because its name disappeared from JSON. It may still be a dependency, or an independently installed user package. Automatic synchronization, ownership tracking and dependency retirement are not implemented in this release. The Windows path refuses removal of any installed package name without a replacement.
+Install/update does not automatically remove an installed package because its name disappeared from JSON. It may still be a dependency, or an independently installed user package. Automatic synchronization, ownership tracking and dependency retirement are not implemented in this release. The Windows path requires separate approval for eligible obsolete dependencies and protects direct, pinned and protected requests.
 
 ## Adding release defaults to an existing configuration
 

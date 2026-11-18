@@ -27,3 +27,38 @@ def coverage(configuration,defaults,records,import_checks=()):
             'release_not_installed':sorted(release-installed),'user_extra_requests':sorted(required-release),
             'verified_imports':sorted(p for p,statuses in groups.items() if all(s=='PASS' for s in statuses)),
             'imports_not_checked':sorted(required-set(groups)),'import_checks':checks}
+
+
+PYTORCH_REQUESTS = frozenset({'pytorch', 'pytorch-cpu', 'pytorch-gpu'})
+
+
+def pytorch_probe(requested):
+    """Verify the actual backend when the user explicitly requests PyTorch."""
+    if not PYTORCH_REQUESTS.intersection(requested):
+        return None
+    import torch
+
+    if 'pytorch-cpu' in requested and torch.version.cuda is not None:
+        raise RuntimeError('The requested CPU-only PyTorch is a CUDA build.')
+    matrix = torch.tensor([[1.0, 2.0], [3.0, 4.0]], device='cpu', requires_grad=True)
+    product = matrix @ matrix
+    expected = [[7.0, 10.0], [15.0, 22.0]]
+    if product.tolist() != expected:
+        raise RuntimeError('PyTorch CPU matrix multiplication failed.')
+    product.sum().backward()
+    if matrix.grad is None or matrix.grad.tolist() != [[7.0, 11.0], [9.0, 13.0]]:
+        raise RuntimeError('PyTorch CPU autograd failed.')
+
+    available = torch.cuda.is_available()
+    if 'pytorch-gpu' in requested and not available:
+        raise RuntimeError('PyTorch cannot access a compatible NVIDIA CUDA device.')
+    report = {'version': str(torch.__version__), 'backend': 'cpu',
+              'compiled_cuda': torch.version.cuda, 'cuda_available': available,
+              'cpu_matrix_multiplication': True, 'autograd': True}
+    if available:
+        gpu = matrix.detach().to('cuda')
+        if (gpu @ gpu).cpu().tolist() != expected:
+            raise RuntimeError('PyTorch CUDA computation or transfer failed.')
+        report.update(backend='cuda', compute_capability=list(torch.cuda.get_device_capability()),
+                      cuda_matrix_multiplication=True, cpu_gpu_transfers=True)
+    return report

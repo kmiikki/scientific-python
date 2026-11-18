@@ -232,7 +232,7 @@ function Get-ScienceChannelArguments {
     param($Configuration)
     $result=@('--no-rc','--override-channels','--strict-channel-priority')
     foreach ($channel in $Configuration.Channels) {$result+=@('-c',$channel)}
-    return ,$result
+    return $result
 }
 
 function Test-ScienceInteractiveConfiguration {

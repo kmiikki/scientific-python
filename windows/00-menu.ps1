@@ -212,14 +212,12 @@ exit `$rc
 
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($child))
 
-    & powershell.exe `
-        -NoLogo `
-        -NoProfile `
-        -ExecutionPolicy Bypass `
-        -EncodedCommand $encoded |
-        Out-Host
-
-    $rc = $LASTEXITCODE
+    # $rc = Invoke-Step also captures native stdout; inherit the console directly.
+    $childArguments=@('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',$encoded)
+    if (-not (Test-ScienceInteractiveConfiguration)) {$childArguments+='-NonInteractive'}
+    $process=Start-Process -FilePath 'powershell.exe' -ArgumentList $childArguments `
+        -NoNewWindow -Wait -PassThru -ErrorAction Stop
+    $rc = $process.ExitCode
 
     if ($rc -ne 0 -and $rc -ne 10) {
         Write-Host ''

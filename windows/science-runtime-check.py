@@ -79,6 +79,13 @@ def checks(prefix=None, gui=False, camera=None):
         except md.PackageNotFoundError: pass
     check('spyder_version', lambda: md.version('spyder') == RELEASE['Spyder'])
     records=package_records(prefix)
+    torch_requests = _package_report.PYTORCH_REQUESTS & _names
+    if torch_requests:
+        torch_report = check('pytorch_backend', lambda: _package_report.pytorch_probe(torch_requests))
+        if torch_report is not None:
+            result['optional']['pytorch'] = torch_report
+        imports.extend({'package': name, 'module': 'torch', 'status': result['checks']['pytorch_backend']['status']}
+                       for name in sorted(torch_requests))
     result['package_selection']=package_selection(prefix,imports,records)
     check('effective_package_names',lambda: not result['package_selection']['missing_effective'])
     def record_ok(name, version=None, build=None):

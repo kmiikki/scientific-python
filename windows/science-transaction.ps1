@@ -57,15 +57,64 @@ function Get-SciencePrefixDigest {
     $metadata=Join-Path $Prefix 'conda-meta'
     if(Test-Path -LiteralPath $metadata) {
         Assert-ScienceTransactionPath $metadata
-        foreach($file in @(Get-ChildItem -LiteralPath $metadata -File|Where-Object {$_.Extension -ceq '.json' -or $_.Name -ceq 'history'}|Sort-Object Name)) {
+        foreach($file in @(Get-ChildItem -LiteralPath $metadata -File|Where-Object {$_.Extension -ceq '.json' -or $_.Name -ceq 'history' -or $_.Name -ceq 'pinned'}|Sort-Object Name)) {
             Assert-ScienceRegularPath $file.FullName
             $lines+=($file.Name+'|'+(Get-ScienceFileSha256 $file.FullName))
         }
     }
     return Get-ScienceTextDigest ($lines -join "`n")
 }
+function Get-ScienceRemovalCandidates {
+    param($Before,$Plan,[string]$Prefix)
+    if(-not $Plan.success){throw 'Cannot review removals from an unsuccessful solve.'}
+    Assert-SciencePlanPrefix $Plan $Prefix
+    $null=Get-ScienceRecordSignature @($Plan.actions.LINK);$null=Get-ScienceRecordSignature @($Plan.actions.UNLINK)
+    $after=@{};foreach($name in $Before.Keys){$after[$name]=$Before[$name]}
+    foreach($record in @($Plan.actions.UNLINK)) {
+        if($null -eq $record){continue}
+        if(-not $Before.ContainsKey([string]$record.name) -or (Get-ScienceIdentity $Before[[string]$record.name]) -cne (Get-ScienceIdentity $record)){throw 'UNLINK does not match the installed package identity.'}
+        $after.Remove([string]$record.name)
+    }
+    foreach($record in @($Plan.actions.LINK)){if($record){$after[[string]$record.name]=$record}}
+    $removed=@($Before.Keys|Where-Object {-not $after.ContainsKey($_)}|Sort-Object)
+    if(-not $removed.Count){return}
+    if(-not $after.Count){throw 'Refusing removal of the complete Science package set.'}
+    $configuration=Assert-ScienceConfiguration (Read-ScienceJson (Get-ScienceConfigurationPath))
+    $protected=@{}
+    foreach($name in @('python','python_abi','spyder','apache-arrow-proc','opencv','ffmpeg')){$protected[$name]=$true}
+    foreach($spec in $configuration.ScientificPackages){$protected[(Get-ScienceSpecName $spec $configuration.Channels)]=$true}
+    foreach($record in $Before.Values){if($record.requested_spec){$protected[(Get-ScienceSpecName $record.requested_spec)]=$true}}
+    # History also protects manually requested packages no longer present in JSON.
+    $history=Join-Path $Prefix 'conda-meta/history';Assert-ScienceRegularPath $history
+    $historyRequestsFound=$false
+    foreach($line in [IO.File]::ReadAllLines($history)) {
+        if($line -match '^# (?:update|install|create) specs:\s*(.*)$') {
+            $historyRequestsFound=$true
+            $serialized=$Matches[1].Trim()
+            if(-not $serialized.StartsWith('[')){throw 'Cannot establish requested-package ownership from history.'}
+            $specs=ConvertFrom-Json -InputObject $serialized -ErrorAction Stop
+            foreach($spec in $specs){$protected[(Get-ScienceSpecName $spec)]=$true}
+        }
+    }
+    if(-not $historyRequestsFound){throw 'Cannot establish requested-package ownership from history.'}
+    $pinned=Join-Path $Prefix 'conda-meta/pinned'
+    if(Test-Path -LiteralPath $pinned){Assert-ScienceRegularPath $pinned;foreach($line in [IO.File]::ReadAllLines($pinned)){if($line.Trim() -and -not $line.Trim().StartsWith('#')){$protected[(Get-ScienceSpecName $line.Trim())]=$true}}}
+    # Only the dependency closure of known requested/protected roots is owned.
+    $dependencies=@{};$queue=New-Object 'Collections.Generic.Queue[string]'
+    foreach($name in $protected.Keys){if($Before.ContainsKey($name)){$queue.Enqueue($name)}}
+    while($queue.Count) {
+        $name=$queue.Dequeue();if($dependencies.ContainsKey($name)){continue};$dependencies[$name]=$true
+        foreach($spec in @($Before[$name].depends)){if($null -ne $spec){$dependency=Get-ScienceSpecName $spec;if($Before.ContainsKey($dependency)){$queue.Enqueue($dependency)}}}
+    }
+    foreach($name in $removed) {
+        if($protected.ContainsKey($name)){throw "Refusing removal of explicitly requested/protected package: $name"}
+        if($Before[$name].requested_spec -isnot [string] -or -not $dependencies.ContainsKey($name)){throw "Refusing removal of package with unproven dependency ownership: $name"}
+        foreach($record in $after.Values){foreach($spec in @($record.depends)){if($null -ne $spec -and (Get-ScienceSpecName $spec) -ceq $name){throw "Refusing removal of dependency still required by $($record.name): $name"}}}
+    }
+    return $removed
+}
 function New-ScienceApprovedLock {
-    param($Before,$Plan,[string]$Prefix,[string]$ConfigHash,[string]$ExecutableHash,[string[]]$RepairNames=@())
+    param($Before,$Plan,[string]$Prefix,[string]$ConfigHash,[string]$ExecutableHash,[string[]]$RepairNames=@(),[string[]]$ApprovedRemovals=@())
     if (-not $Plan.success) {throw 'Cannot approve an unsuccessful solve.'}
     Assert-SciencePlanPrefix $Plan $Prefix
     $null=Get-ScienceRecordSignature @($Plan.actions.LINK);$null=Get-ScienceRecordSignature @($Plan.actions.UNLINK)
@@ -77,13 +126,19 @@ function New-ScienceApprovedLock {
     }
     foreach($r in @($Plan.actions.LINK)) {if($null -ne $r){$after[[string]$r.name]=$r}}
     if((Get-ScienceRecordSignature @((Get-ScienceRecords $Prefix).Values)) -cne (Get-ScienceRecordSignature @($Before.Values))){throw 'Installed state changed during planning.'}
-    # Install/update never owns arbitrary packages or removes names absent from JSON.
-    foreach($name in $Before.Keys){if(-not $after.ContainsKey($name)){throw "Refusing package removal during Install/update: $name"}}
+    $removed=@($Before.Keys|Where-Object {-not $after.ContainsKey($_)}|Sort-Object)
+    if(($removed -join '|') -cne (@($ApprovedRemovals|Sort-Object) -join '|')){throw 'Package removal requires approval of exactly the disappearing dependency names.'}
+    if($removed.Count) {
+        if($RepairNames.Count){throw 'Package repair cannot remove package names.'}
+        if((Get-ScienceFileSha256 (Get-ScienceConfigurationPath)) -cne $ConfigHash){throw 'Active configuration changed during removal review.'}
+        $eligible=@(Get-ScienceRemovalCandidates $Before $Plan $Prefix)
+        if(($eligible -join '|') -cne ($removed -join '|')){throw 'Approved removal eligibility changed.'}
+    }
     $beforeRows=@($Before.Keys|Sort-Object|ForEach-Object {$Before[$_]})
     $afterRows=@($after.Keys|Sort-Object|ForEach-Object {$after[$_]})
     $null=Get-ScienceRecordSignature $beforeRows;$null=Get-ScienceRecordSignature $afterRows
     foreach($r in @($Plan.actions.LINK)) {if($null -ne $r){$null=Get-ScienceArtifactName $r}}
-    return [pscustomobject][ordered]@{schema=1;prefix=[IO.Path]::GetFullPath($Prefix);prefix_files_sha256=(Get-SciencePrefixDigest $Prefix);before=$beforeRows;after=$afterRows;approved=$Plan;config_sha256=$ConfigHash;executable_sha256=$ExecutableHash;repair_names=@($RepairNames)}
+    return [pscustomobject][ordered]@{schema=1;prefix=[IO.Path]::GetFullPath($Prefix);prefix_files_sha256=(Get-SciencePrefixDigest $Prefix);before=$beforeRows;after=$afterRows;approved=$Plan;config_sha256=$ConfigHash;executable_sha256=$ExecutableHash;repair_names=@($RepairNames);approved_removals=@($ApprovedRemovals|Sort-Object)}
 }
 function Get-ScienceArtifactName {
     param($Record)
@@ -93,7 +148,78 @@ function Get-ScienceArtifactName {
     $filename=[Uri]::UnescapeDataString(($uri.AbsolutePath -split '/')[-1])
     $stem="$($Record.name)-$($Record.version)-$($Record.build)"
     if (@(($stem+'.conda'),($stem+'.tar.bz2')) -cnotcontains $filename -or ($uri.AbsolutePath -split '/')[-2] -cne [string]$Record.subdir) {throw "Artifact URL disagrees with package identity: $($Record.name)"}
+    if ($Record.fn -and $Record.fn -cne $filename) {throw "Artifact filename disagrees with package metadata: $($Record.name)"}
     return $filename
+}
+function Get-ScienceCondaForgeRecords {
+    param($Layout,[object[]]$Records)
+    $source='https://conda.anaconda.org/conda-forge'
+    $environment=@{MAMBA_ROOT_PREFIX=$Layout.Root;CONDA_PKGS_DIRS=$Layout.Pkgs;CONDA_SSL_VERIFY='true';MAMBA_SSL_VERIFY='true'}
+    # Keep the complete Windows command line within the native length limit.
+    for($start=0;$start -lt $Records.Count;$start+=75) {
+        $end=[Math]::Min($start+74,$Records.Count-1)
+        $specs=@($Records[$start..$end]|ForEach-Object {"$($_.name)==$($_.version)=$($_.build)"})
+        $arguments=@('repoquery','search','--no-rc','-r',$Layout.Root,'--override-channels','-c',$source,'--repodata-ttl','0','--platform','win-64','--json')+$specs
+        $result=Invoke-ScienceNative $Layout.Micromamba $arguments $environment
+        if($result.ExitCode -ne 0){throw "Conda-forge metadata query failed (exit $($result.ExitCode))."}
+        $reply=ConvertFrom-ScienceTransactionJson $result.Stdout
+        if($reply.query.type -cne 'search' -or $reply.result.status -cne 'OK'){throw 'Conda-forge search did not return package metadata.'}
+        $reply.result.pkgs
+    }
+}
+function Get-ScienceSourceRepairs {
+    param($Layout,[object[]]$Records,[string[]]$Channels)
+    $legacy=@{}
+    foreach($record in $Records) {
+        $null=Get-ScienceIdentity $record
+        $url=[string]$record.url
+        $uri=$null
+        if($url -and [Uri]::TryCreate($url,[UriKind]::Absolute,[ref]$uri) -and $uri.Scheme -ceq 'https'){
+            $null=Get-ScienceArtifactName $record
+            continue
+        }
+        if($url -and (-not $uri -or $url -cnotmatch '^file://' -or -not $uri.IsFile -or $uri.UserInfo -or $uri.Query -or $uri.Fragment)){
+            throw "Unsafe installed package URL: $($record.name)"
+        }
+        $filename=[string]$record.fn
+        if($uri) {
+            $localName=[Uri]::UnescapeDataString(($uri.AbsolutePath -split '/')[-1])
+            if($filename -and $filename -cne $localName){throw "Local artifact filename disagrees with package metadata: $($record.name)"}
+            $filename=$localName
+        }
+        if($filename -and @("$($record.name)-$($record.version)-$($record.build).conda","$($record.name)-$($record.version)-$($record.build).tar.bz2") -cnotcontains $filename){
+            throw "Local artifact filename disagrees with package identity: $($record.name)"
+        }
+        $legacy[[string]$record.name]=[pscustomobject]@{Record=$record;Filename=$filename}
+    }
+    $repairs=@{}
+    if(-not $legacy.Count){return $repairs}
+    $source='https://conda.anaconda.org/conda-forge'
+    if(-not @($Channels|Where-Object {$_ -ceq 'conda-forge' -or $_.TrimEnd('/') -ceq $source}).Count){throw 'Conda-forge is required to verify legacy package metadata.'}
+    Write-Host ("Verifying package sources with conda-forge for {0} installed records..." -f $legacy.Count)
+    try {$rows=@(Get-ScienceCondaForgeRecords $Layout @($legacy.Values.Record))}
+    catch {throw "Could not verify legacy package sources with conda-forge: $($_.Exception.Message)"}
+    foreach($name in $legacy.Keys) {
+        $item=$legacy[$name]
+        $signature=Get-ScienceIdentity $item.Record
+        $matches=@(foreach($candidate in $rows) {
+            if($candidate.name -cne $name -or $candidate.version -cne $item.Record.version -or $candidate.build -cne $item.Record.build -or $candidate.subdir -cne $item.Record.subdir -or $candidate.sha256 -cne $item.Record.sha256){continue}
+            if((Get-ScienceIdentity $candidate) -cne $signature){continue}
+            $fn=Get-ScienceArtifactName $candidate
+            if($item.Filename -and $fn -cne $item.Filename){continue}
+            if($candidate.url -cne "$source/$($candidate.subdir)/$fn"){continue}
+            [pscustomobject]@{url=$candidate.url;channel=$source;fn=$fn}
+        })
+        if($matches.Count -ne 1){throw "Conda-forge could not verify a unique source for $name (version, build, subdirectory and SHA256 must all match)."}
+        $repairs[$name]=$matches[0]
+    }
+    return $repairs
+}
+function Set-ScienceSourceProperties {
+    param($Record,$Source)
+    foreach($key in @('url','channel','fn')){
+        $Record|Add-Member -NotePropertyName $key -NotePropertyValue $Source.$key -Force
+    }
 }
 function Write-ScienceTransactionJson {
     param([string]$Path,$Value)
@@ -180,10 +306,25 @@ function New-ScienceLockedInputs {
     $explicit=Join-Path $Directory 'explicit-local.txt';Set-ScienceAtomicBytes $explicit ([Text.Encoding]::UTF8.GetBytes($text));$inputs[$explicit]=Get-ScienceFileSha256 $explicit
     return [pscustomobject]@{Hashes=$inputs;Environment=$environment;Explicit=$explicit;Channel=$channelUri}
 }
+function ConvertFrom-ScienceTransactionJson {
+    param([string]$Text)
+    # Post-link scripts may write lines before JSON. PowerShell 5.1's JSON
+    # converter can also ignore trailing text, so validate the complete document.
+    $match=[regex]::Match($Text,'(?ms)^[\t ]*\{.*\}[\t \r\n]*\z')
+    if(-not $match.Success){throw 'Native output does not end in one JSON object.'}
+    if(-not ('ScienceStrictJson' -as [type])){Add-Type -Path (Join-Path (Get-ScienceSharedDirectory) 'StrictJson.cs') -ErrorAction Stop}
+    [ScienceStrictJson]::Check($match.Value)
+    $value=ConvertFrom-Json -InputObject $match.Value -ErrorAction Stop
+    if($value -isnot [pscustomobject]){throw 'Native transaction output is not one JSON object.'}
+    return $value
+}
 function Invoke-ScienceLockedTransaction {
     param($Layout,$Lock,[string]$Directory,[string]$ConfigPath,[string]$ExpectedLockDigest,[scriptblock]$BeforeCommit={})
     if($ExpectedLockDigest -cnotmatch '^[0-9a-f]{64}$' -or (Get-ScienceTextDigest ($Lock|ConvertTo-Json -Depth 64 -Compress)) -cne $ExpectedLockDigest){throw 'Approved identity changed before execution.'}
     if([IO.Path]::GetFullPath($Layout.Science) -cne [IO.Path]::GetFullPath($Lock.prefix)){throw 'Execution target differs from approved prefix.'}
+    $finalNames=@($Lock.after|ForEach-Object {$_.name})
+    $removed=@($Lock.before|Where-Object {$finalNames -cnotcontains $_.name}|ForEach-Object {$_.name}|Sort-Object)
+    if(($removed -join '|') -cne (@($Lock.approved_removals|Where-Object {$null -ne $_}|Sort-Object) -join '|')){throw 'Locked removals differ from the separately approved dependency names.'}
     Assert-ScienceTransactionPath $Directory
     $lockPath=Join-Path $Directory 'approved-lock.json'
     Write-ScienceTransactionJson $lockPath $Lock
@@ -205,9 +346,17 @@ function Invoke-ScienceLockedTransaction {
     }
     $execute={param([string[]]$Arguments,[string]$Phase)
         $result=Invoke-ScienceNative $Layout.Micromamba $Arguments $environment
-        if($result.ExitCode -ne 0){throw "$Phase failed (exit $($result.ExitCode)); inspect transaction evidence. No automatic rollback or alternative plan was attempted. $($result.Stderr) $($result.Stdout)"}
-        $plan=$result.Stdout|ConvertFrom-Json -ErrorAction Stop
-        if(-not $plan.success){throw "$Phase did not report success."}
+        if($Phase -ceq 'Locked commit'){$verification.native_exit_code=$result.ExitCode;$verification.stage='save-native-diagnostics'}
+        $nativeDirectory=Join-Path $Directory ('native-'+($Phase.ToLowerInvariant() -replace '[^a-z0-9]+','-'))
+        try {$nativeEvidence=Save-ScienceMambaFailure $Layout $Arguments $result $Phase -Directory $nativeDirectory -SummaryName result.json}
+        catch {throw "$Phase returned exit $($result.ExitCode), but native diagnostics could not be saved; stopped without retry."}
+        if($Phase -ceq 'Locked commit'){$verification.stage='native-exit'}
+        if($result.ExitCode -ne 0){throw "$Phase failed (exit $($result.ExitCode)); diagnostics: $nativeEvidence . No automatic rollback or alternative plan was attempted."}
+        if($Phase -ceq 'Locked commit'){$verification.stage='native-json'}
+        try {$plan=ConvertFrom-ScienceTransactionJson $result.Stdout}
+        catch {throw "$Phase returned invalid transaction JSON (native exit $($result.ExitCode)); diagnostics: $nativeEvidence"}
+        if($Phase -ceq 'Locked commit'){$verification.native_json_parsed=$true;$verification.native_reported_success=$plan.success;$verification.stage='native-success'}
+        if(-not $plan.success){throw "$Phase did not report success (native exit $($result.ExitCode)); diagnostics: $nativeEvidence"}
         return $plan
     }
     & $guard
@@ -223,6 +372,10 @@ function Invoke-ScienceLockedTransaction {
             if($old.Count -ne 1 -or (Get-ScienceIdentity $old[0]) -cne (Get-ScienceIdentity $r)){throw 'Repair must reinstall the same approved identities.'}
         }
         $command=@('install','--no-rc','-r',$Layout.Root,'-p',$Layout.Science,'--offline','--no-pyc','--json','--file',$inputs.Explicit)
+    }elseif($removed.Count){
+        # env update --prune retains some orphan dependencies in Micromamba 2.10.
+        # update --all reproduces the approved removals against the locked universe.
+        $command=@('update','--all','--no-rc','-r',$Layout.Root,'-p',$Layout.Science,'--offline','--json','--file',$inputs.Environment)
     }else{$command=@('env','update','--prune','--no-rc','-r',$Layout.Root,'-p',$Layout.Science,'--offline','--json','--file',$inputs.Environment)}
     & $guard
     $preflight=& $execute ($command+@('--dry-run')) 'Locked preflight'
@@ -232,19 +385,35 @@ function Invoke-ScienceLockedTransaction {
     & $guard
     & $BeforeCommit
     & $guard
-    $committed=& $execute ($command+@('-y')) 'Locked commit'
-    Assert-SciencePlanPrefix $committed $Layout.Science
-    Assert-ScienceSameTransaction $Lock.approved $committed 'Locked commit'
-    Write-ScienceTransactionJson (Join-Path $Directory 'committed-plan.json') $committed
-    if((Get-ScienceRecordSignature @((Get-ScienceRecords $Layout.Science).Values)) -cne (Get-ScienceRecordSignature @($Lock.after))){throw 'Installed state differs from approved final identities.'}
-    # Preserve original dependency/channel metadata rather than ephemeral file:// sources.
-    $byName=@{};foreach($r in $Lock.after){$byName[[string]$r.name]=$r}
-    foreach($file in Get-ChildItem -LiteralPath (Join-Path $Layout.Science 'conda-meta') -Filter '*.json' -File){
-        $actual=[IO.File]::ReadAllText($file.FullName)|ConvertFrom-Json;$record=$byName[[string]$actual.name]
-        foreach($key in @('url','channel','fn','depends','constrains','subdir','sha256')){if($null -ne $record.$key){$actual|Add-Member -NotePropertyName $key -NotePropertyValue $record.$key -Force}}
-        Write-ScienceTransactionJson $file.FullName $actual
+    $verification=[ordered]@{stage='native-commit';native_exit_code=$null;native_json_parsed=$false;native_reported_success=$null;completed=$false;committed_plan_written=$false;installed_identities_verified=$false;exception_type=$null}
+    try {
+        $committed=& $execute ($command+@('-y')) 'Locked commit'
+        $verification.stage='reported-prefix'
+        Assert-SciencePlanPrefix $committed $Layout.Science
+        $verification.stage='approved-link-unlink-identities'
+        Assert-ScienceSameTransaction $Lock.approved $committed 'Locked commit'
+        $verification.stage='write-committed-plan'
+        Write-ScienceTransactionJson (Join-Path $Directory 'committed-plan.json') $committed
+        $verification.committed_plan_written=$true
+        $verification.stage='installed-identities'
+        if((Get-ScienceRecordSignature @((Get-ScienceRecords $Layout.Science).Values)) -cne (Get-ScienceRecordSignature @($Lock.after))){throw 'Installed state differs from approved final identities.'}
+        $verification.installed_identities_verified=$true
+        $verification.stage='restore-source-metadata'
+        # Preserve original dependency/channel metadata rather than ephemeral file:// sources.
+        $byName=@{};foreach($r in $Lock.after){$byName[[string]$r.name]=$r}
+        foreach($file in Get-ChildItem -LiteralPath (Join-Path $Layout.Science 'conda-meta') -Filter '*.json' -File){
+            $actual=[IO.File]::ReadAllText($file.FullName)|ConvertFrom-Json;$record=$byName[[string]$actual.name]
+            foreach($key in @('url','channel','fn','depends','constrains','subdir','sha256')){if($null -ne $record.$key){$actual|Add-Member -NotePropertyName $key -NotePropertyValue $record.$key -Force}}
+            Write-ScienceTransactionJson $file.FullName $actual
+        }
+        $verification.stage='final-input-integrity'
+        if((Get-ScienceFileSha256 $lockPath) -cne $lockHash){throw 'Approved lock changed during commit.'}
+        foreach($path in $inputs.Hashes.Keys){if((Get-ScienceFileSha256 $path) -cne $inputs.Hashes[$path]){throw 'Locked input changed during commit.'}}
+        $verification.stage='complete';$verification.completed=$true
+    } catch {$verification.exception_type=$_.Exception.GetType().FullName;throw}
+    finally {
+        try {Write-ScienceTransactionJson (Join-Path $Directory 'commit-verification.json') $verification}
+        catch {if($verification.completed){throw 'Commit verification evidence could not be written.'}else{Write-Warning 'Commit failure evidence could not be written; inspect native transaction diagnostics.'}}
     }
-    if((Get-ScienceFileSha256 $lockPath) -cne $lockHash){throw 'Approved lock changed during commit.'}
-    foreach($path in $inputs.Hashes.Keys){if((Get-ScienceFileSha256 $path) -cne $inputs.Hashes[$path]){throw 'Locked input changed during commit.'}}
     return $committed
 }

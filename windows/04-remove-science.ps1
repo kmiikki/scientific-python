@@ -7,7 +7,7 @@ param(
 Assert-ScienceBundle $PSScriptRoot
 
 
-$ErrorActionPreference = 'Continue'
+$ErrorActionPreference = 'Stop'
 
 $common = Join-Path $PSScriptRoot 'science-common.ps1'
 if (-not (Test-Path -LiteralPath $common -PathType Leaf)) {
@@ -15,6 +15,8 @@ if (-not (Test-Path -LiteralPath $common -PathType Leaf)) {
     exit 1
 }
 . $common
+. (Join-Path $PSScriptRoot 'science-release.ps1')
+. (Join-Path $PSScriptRoot 'science-update.ps1')
 
 function Stop-Removal {
     param([string]$Message)
@@ -46,52 +48,51 @@ Write-Host "Root       : $($layout.Root)"
 Write-Host "Environment: $($layout.Science)"
 Write-Host "micromamba : $($layout.Micromamba)"
 
-$state = Read-ScienceState -Layout $layout
-Write-Host ('State      : ' + $(if ($state) { 'installer state found' } else { 'not found - existing/manual environment' }))
+try {
+    Assert-ScienceTransactionPath $layout.Science
+    Assert-ScienceTransactionPath $layout.Micromamba
+    $lockPath=Join-Path $layout.Root '.science-update.lock'
+    Assert-ScienceTransactionPath $lockPath
+    $lock=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    try {
+        $state=Get-SciencePreparedInstallationState $layout
+        Assert-ScienceOwnedPrefix $layout $state
+        Assert-ScienceRegularPath $layout.Micromamba
+        if((Get-ScienceFileSha256 $layout.Micromamba) -cne $ScienceRelease.MicromambaSha256){
+            throw 'The selected Micromamba executable does not match the release checksum.'
+        }
+        Assert-ScienceNotInUse $layout
+        if(-not (Test-ScienceInteractiveConfiguration)){throw 'Science removal requires an interactive console.'}
+        Show-OtherInstallationSummary
+        Write-Host 'This removes only the installer-owned Science environment and its launchers.'
+        if((Read-Host 'Remove the science environment? [y/N]').Trim() -notmatch '^(?i:y|yes|j|ja)$'){
+            Write-Host 'No changes were made.'
+            exit 0
+        }
 
-Show-OtherInstallationSummary
-
-if (Get-Process -Name spyder -ErrorAction SilentlyContinue) {
-    Stop-Removal 'Spyder is running. Close Spyder and try again.'
-}
-
-if ($env:CONDA_PREFIX -and (Get-NormalizedPathText $env:CONDA_PREFIX) -ieq (Get-NormalizedPathText $layout.Science)) {
-    Stop-Removal 'The science environment is active. Close that PowerShell or deactivate science first.'
-}
-
-if (-not (Test-Path -LiteralPath $layout.Micromamba -PathType Leaf)) {
-    Stop-Removal "micromamba.exe is missing: $($layout.Micromamba)"
-}
-
-Write-Host ''
-Write-Host 'This removes the whole science environment, including Spyder and all'
-Write-Host 'Python packages installed inside science. Micromamba itself is kept.'
-Write-Host ''
-
-$answer = (Read-Host 'Remove the science environment? [y/N]').Trim()
-if ($answer -notmatch '^(?i:y|yes|j|ja)$') {
-    Write-Host 'No changes were made.'
-    exit 0
-}
-
-$env:MAMBA_ROOT_PREFIX = $layout.Root
-$env:CONDA_PKGS_DIRS = $layout.Pkgs
-$env:MAMBA_EXE = $layout.Micromamba
-
-& $layout.Micromamba env remove -p $layout.Science -y
-if ($LASTEXITCODE -ne 0) {
-    Stop-Removal "micromamba env remove failed with exit code $LASTEXITCODE."
-}
-
-if (Test-Path -LiteralPath $layout.Science -PathType Container) {
-    Stop-Removal 'The science directory still exists after micromamba removal.'
-}
-
-Remove-ScientificPythonSpyderLauncher -Layout $layout
-
-if ($state) {
-    $state | Add-Member -NotePropertyName science_removed_utc -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
-    Write-ScienceState -Layout $layout -State $state
+        $state=Get-SciencePreparedInstallationState $layout
+        Assert-ScienceOwnedPrefix $layout $state
+        Assert-ScienceNotInUse $layout
+        if((Get-ScienceFileSha256 $layout.Micromamba) -cne $ScienceRelease.MicromambaSha256){
+            throw 'Micromamba changed during removal review.'
+        }
+        $env:MAMBA_ROOT_PREFIX=$layout.Root
+        $env:CONDA_PKGS_DIRS=$layout.Pkgs
+        $env:MAMBA_EXE=$layout.Micromamba
+        & $layout.Micromamba env remove --no-rc -r $layout.Root -p $layout.Science -y
+        if($LASTEXITCODE -ne 0 -or [IO.Directory]::Exists($layout.Science)){
+            throw "Micromamba did not remove the Science prefix (exit $LASTEXITCODE)."
+        }
+        Remove-ScientificPythonSpyderLauncher -Layout $layout
+        $state.PSObject.Properties.Remove('science_owner_id')
+        $state|Add-Member -NotePropertyName finalization_stage -NotePropertyValue 'removed' -Force
+        $state|Add-Member -NotePropertyName science_removed_utc -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
+        Write-ScienceTransactionJson $layout.State $state
+    } finally {
+        $lock.Dispose()
+    }
+} catch {
+    Stop-Removal $_.Exception.Message
 }
 
 Write-Host ''

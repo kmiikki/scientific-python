@@ -60,10 +60,23 @@ try {
         $target=New-Layout 'cancelled';$oldLocal=$env:LOCALAPPDATA
         $review=(Get-Command Confirm-ScienceTransaction).ScriptBlock
         try {
+            function Test-ScienceInteractiveConfiguration {return $true}
             function Confirm-ScienceTransaction {param($Lock,[string]$Identity);return $false}
             Reject {Invoke-ScienceReviewedTransaction $target @{} (Plan @($b)) (Join-Path $target.Root 'config.json')} 'cancelled'
             Assert-True (-not (Test-Path -LiteralPath $target.Science));Assert-True (@(Get-ChildItem $target.Tmp).Count -eq 0)
         }finally{Set-Item Function:Confirm-ScienceTransaction $review;$env:LOCALAPPDATA=$oldLocal}
+    }
+    Case 'native-remove-owned-prefix-preserves-other-environment' {
+        $target=New-Layout 'owned-removal'
+        Apply $target (Plan @($b))
+        $other=Join-Path $target.Root 'envs/independent'
+        [void][IO.Directory]::CreateDirectory($other)
+        $sentinel=Join-Path $other 'user-data.txt'
+        [IO.File]::WriteAllText($sentinel,'preserve')
+        [IO.File]::WriteAllText((Join-Path $target.Science '.science-environment-owner'),'test-fixture')
+        $result=Invoke-ScienceNative $Micromamba @('env','remove','--no-rc','-r',$target.Root,'-p',$target.Science,'-y')
+        Assert-True ($result.ExitCode -eq 0 -and -not [IO.Directory]::Exists($target.Science))
+        Assert-True ([IO.File]::ReadAllText($sentinel) -ceq 'preserve')
     }
     Case 'identity-rejects-sha-change' {$changed=$a1|ConvertTo-Json -Depth 32|ConvertFrom-Json;$changed.sha256='a'*64;Reject {Assert-ScienceSameTransaction (Plan @($a1)) (Plan @($changed)) 'test'} 'LINK'}
     Case 'identity-rejects-unlink-change' {Reject {Assert-ScienceSameTransaction (Plan @($a2) @($a1)) (Plan @($a2) @($b)) 'test'} 'UNLINK'}

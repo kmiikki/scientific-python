@@ -71,14 +71,72 @@ function Invoke-ScienceNative {
         return @{ExitCode=$process.ExitCode;Stdout=$stdout.GetAwaiter().GetResult();Stderr=$stderr.GetAwaiter().GetResult()}
     } finally { $process.Dispose() }
 }
+function Save-ScienceMambaFailure {
+    param($Layout,[string[]]$Arguments,$Result,[string]$Reason,[string]$Directory,[ValidateSet('failure.json','result.json')][string]$SummaryName='failure.json')
+    # Redact all streams, not just argv: native JSON/errors can echo URLs or secrets.
+    $secrets=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $sensitive='(?:[A-Za-z0-9_-]*(?:token|password|passwd|secret|credential|api[_-]?key|access[_-]?key|username|user[_-]?name|authorization|auth)[A-Za-z0-9_-]*)'
+    for($i=0;$i -lt $Arguments.Count;$i++) {
+        if($Arguments[$i] -match ('(?i)^--?'+$sensitive+'$') -and $i+1 -lt $Arguments.Count){[void]$secrets.Add($Arguments[$i+1])}
+        if($Arguments[$i] -match ('(?i)^--?'+$sensitive+'=(.*)$')){[void]$secrets.Add($Matches[1])}
+    }
+    foreach($entry in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
+        if([string]$entry.Key -match ('(?i)^'+$sensitive+'$') -and [string]$entry.Value){[void]$secrets.Add([string]$entry.Value)}
+    }
+    $text=(@($Arguments)+@([string]$Result.Stdout,[string]$Result.Stderr) -join "`n").Replace('\/','/')
+    foreach($match in [regex]::Matches($text,('(?i)\b'+$sensitive+'["'']?\s*[:=]\s*(?<quote>["''])(?<value>.*?)\k<quote>'))) {
+        [void]$secrets.Add($match.Groups['value'].Value)
+    }
+    foreach($match in [regex]::Matches($text,'(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"'']+')) {
+        $uri=$null
+        if([Uri]::TryCreate($match.Value,[UriKind]::Absolute,[ref]$uri)) {
+            foreach($value in @($uri.UserInfo -split ':')+@([regex]::Matches($uri.Query,'[?&][^=&]+=([^&]+)')|ForEach-Object {$_.Groups[1].Value})) {
+                if($value){[void]$secrets.Add($value);[void]$secrets.Add([Uri]::UnescapeDataString($value))}
+            }
+        }
+    }
+    foreach($pattern in @(
+        ('(?i)\b'+$sensitive+'["'']?\s*[:=]\s*["'']?([^\s,"'';&}\]]+)'),
+        '(?i)\b(?:Bearer|Basic)\s+([A-Za-z0-9._~+/=-]+)',
+        '(?i)/t/([^/\s?"'']+)'
+    )) {
+        foreach($match in [regex]::Matches($text,$pattern)){[void]$secrets.Add($match.Groups[1].Value)}
+    }
+    $redact={param([AllowEmptyString()][string]$Value)
+        $Value=$Value.Replace('\/','/')
+        # Remove whole URLs, including unknown query credentials and signed URLs.
+        $Value=[regex]::Replace($Value,'(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"'']+','[REDACTED-URL]')
+        $Value=[regex]::Replace($Value,'(?i)/t/[^/\s?"'']+','/t/[REDACTED]')
+        foreach($secret in @($secrets|Sort-Object Length -Descending)){if($secret){$Value=$Value.Replace($secret,'[REDACTED]')}}
+        return $Value
+    }
+    if(-not $Directory){$Directory=Join-Path $Layout.Tmp ('science-solver-failure-'+[Guid]::NewGuid().ToString('N'))}
+    $directory=[IO.Path]::GetFullPath($Directory)
+    Assert-ScienceTransactionPath $directory
+    [void][IO.Directory]::CreateDirectory($directory)
+    $encoding=New-Object Text.UTF8Encoding($false)
+    $summary=[ordered]@{exit_code=$Result.ExitCode;reason=$Reason;arguments=@($Arguments|ForEach-Object {& $redact $_});stdout='stdout.txt';stderr='stderr.txt'}
+    [IO.File]::WriteAllText((Join-Path $directory $SummaryName),($summary|ConvertTo-Json -Depth 8),$encoding)
+    [IO.File]::WriteAllText((Join-Path $directory 'stdout.txt'),(& $redact ([string]$Result.Stdout)),$encoding)
+    [IO.File]::WriteAllText((Join-Path $directory 'stderr.txt'),(& $redact ([string]$Result.Stderr)),$encoding)
+    return $directory
+}
 function Invoke-ScienceMambaJson {
     param($Layout,[string[]]$Arguments)
     $envMap=@{MAMBA_ROOT_PREFIX=$Layout.Root;CONDA_PKGS_DIRS=$Layout.Pkgs;TEMP=$Layout.Tmp;TMP=$Layout.Tmp;Path=((Join-Path $Layout.Science 'Library\bin')+';'+$env:Path)}
     $result=Invoke-ScienceNative -Executable $Layout.Micromamba -Arguments $Arguments -Environment $envMap
-    if ($result.ExitCode -ne 0) { throw "Micromamba transaction/solve failed (exit $($result.ExitCode)); no blind retry was performed." }
-    try { $plan=[regex]::Match($result.Stdout,'(?s)\{.*\}').Value | ConvertFrom-Json }
-    catch { throw 'Micromamba did not return valid transaction JSON.' }
-    if (-not $plan.success) { throw 'Micromamba did not report success.' }
+    $reason=$null
+    if ($result.ExitCode -ne 0) {$reason='Micromamba transaction/solve failed'}
+    else {
+        try { $plan=[regex]::Match($result.Stdout,'(?s)\{.*\}').Value | ConvertFrom-Json -ErrorAction Stop }
+        catch {$reason='Micromamba did not return valid transaction JSON'}
+        if(-not $reason -and -not $plan.success){$reason='Micromamba did not report success'}
+    }
+    if($reason) {
+        try {$diagnostics=Save-ScienceMambaFailure $Layout $Arguments $result $reason}
+        catch {throw "$reason (exit $($result.ExitCode)); diagnostic files could not be written. No blind retry was performed."}
+        throw "$reason (exit $($result.ExitCode)); diagnostics: $diagnostics . No blind retry was performed."
+    }
     return $plan
 }
 function Set-ScienceAtomicBytes {
@@ -139,13 +197,32 @@ function Assert-ScienceNotInUse {
 }
 function Confirm-ScienceTransaction {
     param($Lock,[string]$Identity)
+    if(-not (Test-ScienceInteractiveConfiguration)){return $false}
     Show-ScienceTransaction $Lock.approved (Get-ScienceRecords $Lock.prefix)
     Write-Host ('Approved-plan SHA256: '+$Identity)
     return ((Read-Host 'Apply exactly this transaction? [y/N]').Trim() -match '^(?i:y|yes)$')
 }
+function Confirm-ScienceDependencyRemovals {
+    param([string[]]$Names,$Before)
+    if(-not (Test-ScienceInteractiveConfiguration)){return $false}
+    Write-Host 'Dependency package names that will disappear (not upgrades/replacements):'
+    foreach($name in $Names){Write-Host ("  {0} {1} / {2}" -f $name,$Before[$name].version,$Before[$name].build)}
+    return ((Read-Host 'Remove exactly these dependency packages? [y/N]').Trim() -match '^(?i:y|yes)$')
+}
 function Invoke-ScienceReviewedTransaction {
-    param($Layout,$Before,$Plan,[string]$ConfigPath,[string[]]$RepairNames=@())
-    $lock=New-ScienceApprovedLock $Before $Plan $Layout.Science (Get-ScienceFileSha256 $ConfigPath) (Get-ScienceFileSha256 $Layout.Micromamba) $RepairNames
+    param($Layout,$Before,$Plan,[string]$ConfigPath,[string[]]$RepairNames=@(),[scriptblock]$OnCommit)
+    if(-not (Test-ScienceInteractiveConfiguration)){throw 'Non-interactive package transactions are not permitted.'}
+    $removals=@(Get-ScienceRemovalCandidates $Before $Plan $Layout.Science)
+    if($removals.Count -and -not (Confirm-ScienceDependencyRemovals $removals $Before)){throw 'Dependency removals cancelled; no package transaction was started.'}
+    $lock=New-ScienceApprovedLock $Before $Plan $Layout.Science (Get-ScienceFileSha256 $ConfigPath) (Get-ScienceFileSha256 $Layout.Micromamba) $RepairNames $removals
+    $sourceRepairs=Get-ScienceSourceRepairs $Layout $lock.after @($script:ScienceRelease.Channels)
+    for($i=0;$i -lt $lock.after.Count;$i++) {
+        $record=$lock.after[$i]
+        if($sourceRepairs.ContainsKey([string]$record.name)){
+            $lock.after[$i]=$record.PSObject.Copy()
+            Set-ScienceSourceProperties $lock.after[$i] $sourceRepairs[[string]$record.name]
+        }
+    }
     $identity=Get-ScienceTextDigest ($lock|ConvertTo-Json -Depth 64 -Compress)
     if(-not (Confirm-ScienceTransaction $lock $identity)){throw 'Transaction cancelled; no package commit was started.'}
     $directory=Join-Path $Layout.Tmp ('science-transaction-'+[Guid]::NewGuid().ToString('N'))
@@ -153,13 +230,103 @@ function Invoke-ScienceReviewedTransaction {
     Write-Host ('Transaction evidence: '+$directory)
     $context=@{Guard=$null}
     try {
-        $callback={Assert-ScienceNotInUse $Layout;$context.Guard=Start-ScienceGtkGuard $Layout $Before}.GetNewClosure()
+        # Keep caller scope: GetNewClosure creates a module that hides our helpers.
+        $callback={
+            Assert-ScienceNotInUse $Layout
+            $context.Guard=Start-ScienceGtkGuard $Layout $Before
+            if($OnCommit){& $OnCommit}
+        }
         $null=Invoke-ScienceLockedTransaction $Layout $lock $directory $ConfigPath $identity $callback
     } finally {Stop-ScienceGtkGuard $context.Guard $Layout}
     Update-SciencePixbufCache $Layout
 }
+function Get-SciencePreparedInstallationState {
+    param($Layout)
+    Assert-ScienceRegularPath $Layout.State
+    $state=Read-ScienceJson $Layout.State
+    if(-not $state.user_sid -or $state.user_sid -cne $Layout.Sid -or $state.layout_mode -cne $Layout.Mode -or
+        $state.root -ine $Layout.Root -or $state.micromamba -ine $Layout.Micromamba){
+        throw 'The preparation state does not identify this user, layout and Micromamba root.'
+    }
+    return $state
+}
+function Assert-ScienceOwnedPrefix {
+    param($Layout,$State)
+    $marker=Join-Path $Layout.Science '.science-environment-owner'
+    Assert-ScienceRegularPath $marker
+    $ownership=Read-ScienceJson $marker
+    if($State.science_owner_id -cnotmatch '^[0-9a-f]{32}$' -or $ownership.id -cne $State.science_owner_id -or
+        $ownership.sid -cne $Layout.Sid -or $ownership.prefix -ine $Layout.Science){
+        throw 'The selected Science prefix lacks matching environment ownership evidence.'
+    }
+}
+function Assert-ScienceRecordedPrefix {
+    param($Layout,$Installed)
+    $manifest=Read-ScienceJson (Join-Path $Layout.Root 'science-packages.json')
+    $recorded=@(foreach($row in $manifest.packages){
+        [pscustomobject]@{name=$row.name;version=$row.version;build=$row.build_string;subdir=$row.platform;sha256=$row.sha256}
+    })
+    if(-not $Installed.Count -or (Get-ScienceRecordSignature $recorded) -cne (Get-ScienceRecordSignature @($Installed.Values))){
+        throw 'The existing Science prefix differs from its last verified package manifest.'
+    }
+}
+function Find-ScienceApprovedRecovery {
+    param($Layout,$Installed,[string]$ConfigHash)
+    if(-not $Installed.Count){return $null}
+    $identity=Get-ScienceRecordSignature @($Installed.Values)
+    $exeHash=Get-ScienceFileSha256 $Layout.Micromamba
+    $directories=Get-ChildItem -LiteralPath $Layout.Tmp -Filter 'science-transaction-*' -Directory | Sort-Object LastWriteTimeUtc -Descending
+    foreach($directory in $directories) {
+        if($directory.Name -cnotmatch '^science-transaction-[0-9a-f]{32}$'){continue}
+        try {
+            $path=Join-Path $directory.FullName 'approved-lock.json'
+            Assert-ScienceTransactionPath $directory.FullName
+            Assert-ScienceRegularPath $path
+            $lock=Read-ScienceJson $path
+            if($lock.schema -eq 1 -and $lock.prefix -ieq $Layout.Science -and $lock.config_sha256 -ceq $ConfigHash -and
+                $lock.executable_sha256 -ceq $exeHash -and (Get-ScienceRecordSignature @($lock.after)) -ceq $identity) {
+                return $directory.Name
+            }
+        } catch {
+            # Incomplete or redirected evidence cannot authorize recovery.
+            continue
+        }
+    }
+    return $null
+}
+function Repair-ScienceInstalledSources {
+    param($Layout,$Before,[string[]]$Channels,[string]$ConfigPath,[string]$ConfigHash)
+    $prefixDigest=Get-SciencePrefixDigest $Layout.Science
+    $sourceRepairs=Get-ScienceSourceRepairs $Layout @($Before.Values) $Channels
+    if(-not $sourceRepairs.Count){return}
+    if(-not (Test-ScienceInteractiveConfiguration)){throw 'Package-source restoration requires an interactive console.'}
+    Write-Host ('Verified package sources: '+(@($sourceRepairs.Keys|Sort-Object) -join ', '))
+    if((Read-Host 'Restore the verified conda-forge sources for these installed packages? [y/N]').Trim() -notmatch '^(?i:y|yes)$'){
+        throw 'Package-source restoration was cancelled.'
+    }
+    Assert-ScienceNotInUse $Layout
+    if((Get-SciencePrefixDigest $Layout.Science) -cne $prefixDigest -or (Get-ScienceFileSha256 $ConfigPath) -cne $ConfigHash){
+        throw 'Installed package metadata or configuration changed before source restoration.'
+    }
+    $metadata=Join-Path $Layout.Science 'conda-meta'
+    foreach($file in Get-ChildItem -LiteralPath $metadata -Filter '*.json' -File){
+        Assert-ScienceRegularPath $file.FullName
+        $record=Read-ScienceJson $file.FullName
+        if($sourceRepairs.ContainsKey([string]$record.name)){
+            Set-ScienceSourceProperties $record $sourceRepairs[[string]$record.name]
+            Write-ScienceTransactionJson $file.FullName $record
+        }
+    }
+    $final=Get-ScienceRecords $Layout.Science
+    if((Get-ScienceRecordSignature @($final.Values)) -cne (Get-ScienceRecordSignature @($Before.Values))){throw 'Installed identities changed during source restoration.'}
+    foreach($name in $sourceRepairs.Keys){
+        if($final[$name].url -cne $sourceRepairs[$name].url -or $final[$name].fn -cne $sourceRepairs[$name].fn){
+            throw "Package-source restoration failed: $name"
+        }
+    }
+}
 function Invoke-ScienceEnvironmentSync {
-    param($Layout,[string[]]$Packages)
+    param($Layout,[string[]]$Packages,[scriptblock]$AfterSync)
     if(-not $Layout -or -not $Layout.Root -or -not $Layout.Science -or -not $Layout.Micromamba){throw 'A verified installation layout is required.'}
     foreach($path in @($Layout.Root,$Layout.Science,$Layout.Micromamba,$Layout.Tmp,$Layout.Pkgs)){Assert-ScienceTransactionPath $path}
     if([IO.Path]::GetFullPath($Layout.Science) -ine [IO.Path]::GetFullPath((Join-Path $Layout.Root 'envs/science'))){throw 'Unexpected Science prefix.'}
@@ -173,7 +340,45 @@ function Invoke-ScienceEnvironmentSync {
     $script:ScienceRelease=$effective
     $exclusive=$null
     try {
-        $exclusive=[IO.File]::Open((Join-Path $Layout.Root '.science-update.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        $lockPath=Join-Path $Layout.Root '.science-update.lock'
+        Assert-ScienceTransactionPath $lockPath
+        $exclusive=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        if($AfterSync) {
+            $state=Get-SciencePreparedInstallationState $Layout
+            $onCommit={
+                $null=Get-SciencePreparedInstallationState $Layout
+                $state|Add-Member -NotePropertyName finalization_stage -NotePropertyValue 'package-commit' -Force
+                Write-ScienceTransactionJson $Layout.State $state
+            }
+            if([IO.Directory]::Exists($Layout.Science)){
+                if($state.science_owner_id){Assert-ScienceOwnedPrefix $Layout $state}
+                if($state.finalization_stage -cne 'complete' -or -not $state.science_owner_id){
+                    $before=Get-ScienceRecords $Layout.Science
+                    $evidence=Find-ScienceApprovedRecovery $Layout $before $initialConfigHash
+                    if($evidence) {
+                        $recoveryDigest=Get-SciencePrefixDigest $Layout.Science
+                        $null=Assert-SciencePlan ([pscustomobject]@{success=$true;actions=$null}) $before (Get-ScienceMediaFloors $before) $Packages
+                        if(-not (Test-ScienceInteractiveConfiguration)){throw 'Interrupted installation finalization requires an interactive console.'}
+                        Write-Host ('Installed package identities match the approved transaction: '+$evidence)
+                        if((Read-Host 'Finish installation using those installed packages? [y/N]').Trim() -notmatch '^(?i:y|yes)$'){
+                            throw 'Interrupted installation finalization was cancelled.'
+                        }
+                        Assert-ScienceNotInUse $Layout
+                        if((Get-SciencePrefixDigest $Layout.Science) -cne $recoveryDigest -or (Get-ScienceFileSha256 $configPath) -cne $initialConfigHash){
+                            throw 'Approved recovery inputs changed.'
+                        }
+                        Repair-ScienceInstalledSources $Layout $before @($effective.Channels) $configPath $initialConfigHash
+                        Update-SciencePixbufCache $Layout
+                        & $AfterSync $state $evidence
+                        return
+                    }
+                    if(-not $state.science_owner_id){
+                        if(-not $state.last_sync_utc){throw 'The existing Science prefix has no completed installer state or matching approved transaction.'}
+                        Assert-ScienceRecordedPrefix $Layout $before
+                    }
+                }
+            }
+        }
         # Each necessary repair has its own displayed, approved and locked transaction.
         # The main solve happens afterwards, before its separate approval.
         foreach($name in @('libglib','gdk-pixbuf','librsvg')) {
@@ -192,11 +397,23 @@ function Invoke-ScienceEnvironmentSync {
             } finally {if([IO.File]::Exists($repairFile)){[IO.File]::Delete($repairFile)}}
             $null=Assert-SciencePlan $repair $before $floors @('opencv','ffmpeg',$name)
             if((Get-ScienceFileSha256 $configPath) -cne $initialConfigHash){throw 'Configuration changed during planning; start again.'}
-            Invoke-ScienceReviewedTransaction $Layout $before $repair $configPath @($name)
+            Invoke-ScienceReviewedTransaction $Layout $before $repair $configPath @($name) -OnCommit $onCommit
         }
         $before=Get-ScienceRecords $Layout.Science;$floors=Get-ScienceMediaFloors $before
         $isInstalled=[IO.Directory]::Exists((Join-Path $Layout.Science 'conda-meta'))
         if([IO.Directory]::Exists($Layout.Science) -and -not $isInstalled){throw 'Existing Science directory has no package metadata; preserve it and investigate.'}
+        $requests=@($Packages|ForEach-Object {Get-ScienceSpecName $_})
+        if($requests -ccontains 'pytorch-gpu'){
+            $nvidia=Get-Command nvidia-smi.exe -CommandType Application -ErrorAction SilentlyContinue
+            if(-not $nvidia){throw 'The requested CUDA PyTorch build requires a working NVIDIA driver.'}
+            $gpu=& $nvidia.Source -L
+            if($LASTEXITCODE -ne 0 -or -not ($gpu -match '^GPU \d+:')){
+                throw 'NVIDIA device discovery failed before solving the CUDA PyTorch request.'
+            }
+            Write-Host 'PyTorch backend requested: CUDA. Micromamba will solve against the detected driver.'
+        } elseif($requests -ccontains 'pytorch-cpu'){
+            Write-Host 'PyTorch backend requested: CPU.'
+        }
         $verb=if($isInstalled){'update'}else{'create'}
         $arguments=@($verb,'-p',$Layout.Science,'-r',$Layout.Root)+@(Get-ScienceChannelArguments $effective)+@('--no-shortcuts','--no-pyc','--json','--dry-run')
         if($isInstalled){$arguments+='--all'}
@@ -205,10 +422,26 @@ function Invoke-ScienceEnvironmentSync {
         $plan=Invoke-ScienceMambaJson $Layout $arguments
         $null=Assert-SciencePlan $plan $before $floors $Packages
         if((Get-ScienceFileSha256 $configPath) -cne $initialConfigHash){throw 'Configuration changed during planning; start again.'}
-        if(-not @(@($plan.actions.LINK)+@($plan.actions.UNLINK)|Where-Object {$null -ne $_}).Count){Write-Host 'The environment already satisfies the resolved requests.';return}
-        Invoke-ScienceReviewedTransaction $Layout $before $plan $configPath
+        if(-not @(@($plan.actions.LINK)+@($plan.actions.UNLINK)|Where-Object {$null -ne $_}).Count){
+            Repair-ScienceInstalledSources $Layout $before @($effective.Channels) $configPath $initialConfigHash
+            if($AfterSync){
+                $finalizationDigest=Get-SciencePrefixDigest $Layout.Science
+                if(-not (Test-ScienceInteractiveConfiguration) -or (Read-Host 'Verify and refresh Science installer state and launchers? [y/N]').Trim() -notmatch '^(?i:y|yes)$'){
+                    throw 'Finalization was cancelled.'
+                }
+                Assert-ScienceNotInUse $Layout
+                if((Get-SciencePrefixDigest $Layout.Science) -cne $finalizationDigest -or (Get-ScienceFileSha256 $configPath) -cne $initialConfigHash){
+                    throw 'Approved finalization inputs changed.'
+                }
+                & $AfterSync $state $null
+            }
+            Write-Host 'The environment already satisfies the resolved requests.'
+            return
+        }
+        Invoke-ScienceReviewedTransaction $Layout $before $plan $configPath -OnCommit $onCommit
         $null=Assert-SciencePlan ([pscustomobject]@{success=$true;actions=$null}) (Get-ScienceRecords $Layout.Science) $floors $Packages
         Write-Host 'Approved package identities and GTK cache checks passed.'
+        if($AfterSync){& $AfterSync $state $null}
     } finally {if($exclusive){$exclusive.Dispose()}}
 }
 . (Join-Path $PSScriptRoot 'science-transaction.ps1')

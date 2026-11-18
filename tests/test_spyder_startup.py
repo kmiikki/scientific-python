@@ -143,8 +143,16 @@ class SpyderStartupTests(unittest.TestCase):
         root=self.support.parent.parent;prefix=root/'envs/science'
         (prefix/'conda-meta').mkdir(parents=True);(prefix/'conda-meta/history').touch()
         (prefix/'.science-owner.json').write_text(json.dumps({'managed_by':'scientific-python-ubuntu','root':str(root)}))
+        identity = prefix.stat()
+        (root / '.science-env-owner.json').write_text(json.dumps({
+            'managed_by': 'scientific-python-ubuntu', 'scope': 'science-environment',
+            'root': str(root), 'prefix': str(prefix), 'micromamba_exe': str(root / 'bin/micromamba'),
+            'phase': 'installed', 'prefix_identity': [identity.st_dev, identity.st_ino],
+        }))
         spec=importlib.util.spec_from_file_location('activation_test_manager',self.support/'science-manager.py')
         manager=importlib.util.module_from_spec(spec);spec.loader.exec_module(manager)
+        (root / '.science-env-owner.json').chmod(0o600)
+        (prefix / '.science-owner.json').chmod(0o600)
         for active,folder in [(True,'activate.d'),(False,'deactivate.d')]:
             path=prefix/'etc/conda'/folder/'scientific-python-spyder.sh'
             path.parent.mkdir(parents=True)

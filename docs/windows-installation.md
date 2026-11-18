@@ -40,3 +40,14 @@ The launcher targets the selected Science environment and applies the managed Op
 - **6 — Remove Micromamba:** a separate, broader operation with additional checks and confirmation. Do not use it to remove only Science.
 
 Close Science processes and deactivate the environment before changing it. If multiple supported layouts exist, verify the selected path in the menu. Other environments are never an implied removal target.
+
+
+## Interrupted installation and removal
+
+If a native transaction finished and later setup stopped, keep the transaction evidence under the selected root's temporary directory. Run **Install/update** again with the same configuration. When the installed identities match an approved transaction, the installer can resume verification and finish state, OpenCL and launcher setup after approval. Temporary or missing conda-forge package URLs require an exact version, build, subdirectory and SHA-256 match to repository metadata. Inspect the specific failure if a source cannot be verified.
+
+Use **Remove science** after a successful installer finalization. It requires the matching prefix ownership marker and explicit approval. It removes the selected Science environment and its launchers while keeping the Micromamba root and every other environment. A legacy environment with insufficient evidence is preserved.
+
+## Windows 11 acceptance
+
+After the approved `main` update, use **Code → Download ZIP** and record the commit being tested. Verify the existing environment's update and no-op paths first. On a separately approved disposable root, test fresh installation, interruption after native commit, recovery without package changes and removal with a second environment present. Test the desktop shortcut, `science-spyder`, the Start-menu entry if present, the first Spyder console, OpenCV/FFV1 and the HDF5 compatibility sample. Check CPU or CUDA PyTorch only after explicitly adding its request and approving the solver plan.

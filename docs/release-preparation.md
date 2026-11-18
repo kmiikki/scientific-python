@@ -1,6 +1,6 @@
 # v0.1.0 release-preparation result
 
-Prepared on 2026-11-17. This is a local development-release preparation; no GitHub repository, push, remote tag or release was created.
+Prepared on 2026-11-17. This report covers the original local preparation. See the [development and publication policy](release-checklist.md) for the current GitHub workflow.
 
 ## Source changes
 
@@ -37,7 +37,7 @@ The native contract fixtures contain only small generated text files. Test roots
 
 ## Pending acceptance and limits
 
-Native Windows 11 / PowerShell 5.1, Ubuntu 24.04/26.04 remove/install, full scientific runtime, GUI-connected Spyder/first console, desktop login persistence and optional/GPU combinations remain unaccepted. No automatic rollback, Synchronize, ownership engine or pending-retirement feature is claimed. Native acceptance and user documentation review remain the gates before treating the development release as publicly ready.
+Native Windows 11 / PowerShell 5.1, Ubuntu 24.04/26.04 remove/install, full scientific runtime, GUI-connected Spyder/first console, desktop login persistence and optional/GPU combinations remain unaccepted. No automatic rollback, Synchronize, ownership engine or pending-retirement feature is claimed. These checks were pending in the original preparation.
 
 No unresolved approved-plan mismatch remains in the isolated supported executor paths. Unknown or unverifiable native events still stop. A partial native commit can require manual diagnosis; it is not reported as a rollback or success.
 
@@ -60,12 +60,10 @@ All Markdown intended for publication:
 - [Known limitations](known-limitations.md)
 - [Technical architecture](architecture.md)
 - [Testing](testing.md)
-- [Release checklist](release-checklist.md)
+- [Development and publication policy](release-checklist.md)
 - [This preparation report](release-preparation.md)
 - [Spyder startup fix](spyder-startup-fix.md)
 - [Release package additions](release-package-upgrade.md)
 - [Shared fixture notes](../shared/fixtures/README.md)
 
 The official [MIT license](../LICENSE) contains copyright © 2026 Kim Miikki. No bundled third-party implementation requiring a separate source license was identified in the public-source review; downloaded packages keep their own licenses, including the FFmpeg GPL variant.
-
-Next: review these documents, perform supervised native acceptance as appropriate, and give separate approval before any GitHub publication. See the [short release checklist](release-checklist.md).

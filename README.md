@@ -8,9 +8,9 @@
 
 Set up a scientific Python workspace with **Spyder, JupyterLab, numerical tools, machine learning, image processing and video support**. A guided menu checks your setup, resolves dependencies and asks you to approve the package changes.
 
-**v0.1.0 Development Release preparation.** Windows package execution is implemented and covered by isolated contract tests. Native Windows 11 / PowerShell 5.1 and Ubuntu 26.04 acceptance are pending. Ubuntu 24.04 base installation/Spyder acceptance has been reported by the user; the seven-package update needs its final manual check. See [known limitations](docs/known-limitations.md) before installing.
+**v0.9.0 development.** The current source integrates the Windows installer hotfixes and tightens Ubuntu legacy ownership checks. Native acceptance of the current installers is ongoing. See [known limitations](docs/known-limitations.md) before installing.
 
-[Ubuntu guide](docs/ubuntu-installation.md) · [Windows guide](docs/windows-installation.md) · [Customize packages](docs/configuration.md) · [Release checklist](docs/release-checklist.md)
+[Ubuntu guide](docs/ubuntu-installation.md) · [Windows guide](docs/windows-installation.md) · [Customize packages](docs/configuration.md) · [Development and releases](docs/release-checklist.md)
 
 ## 🎯 Why This Project?
 
@@ -31,13 +31,15 @@ You do not need to learn Conda commands to use the installer. To customize the p
 
 | Platform | Target | Acceptance status |
 |---|---|---|
-| Ubuntu 24.04 LTS | x86-64, desktop session | User-reported base installation/Spyder acceptance passed; seven-package update pending |
-| Ubuntu 26.04 LTS | x86-64, desktop session | Source checks passed; native acceptance pending |
+| Ubuntu 24.04 LTS | x86-64, desktop session | Native imports, media and headless Spyder kernel passed on the existing environment. Current installer lifecycle and GUI acceptance pending. |
+| Ubuntu 26.04 LTS | x86-64, desktop session | Earlier fresh installation passed. Current update and legacy ownership acceptance pending. |
 | Windows 11 | x86-64, Windows PowerShell 5.1 | Execution contract tested on Linux; native acceptance pending |
 
 The environment uses ordinary **GIL-enabled Python 3.14**, **OpenCV 5.x with Qt6** and **FFmpeg 9.x GPL**. ARM systems and other operating systems are outside this release's scope.
 
 ## 🚀 Quick Start
+
+[Download the current development source](https://github.com/kmiikki/scientific-python/archive/refs/heads/main.zip). GitHub’s **Code → Download ZIP** also downloads `scientific-python-main.zip`. Use the [tagged releases](https://github.com/kmiikki/scientific-python/releases) to obtain a specific milestone.
 
 Keep the **entire extracted project folder** together, including `shared/`. Do not copy a single installer script out of it. Work from a trusted source copy; the local manifests check file consistency, not publisher identity.
 
@@ -78,7 +80,7 @@ The usual environment location is `%USERPROFILE%\micromamba\envs\science`. An al
 
 The [complete default configuration](shared/science-release.default.json) contains all 42 direct requests. Windows uses an FFmpeg minimum of 9.0.1; Ubuntu uses 9.0.2. Additional dependencies are resolved automatically.
 
-**Optional additions:** PyTorch, torchvision, LightGBM and Pingouin can be added to the same package list. Their platform and GPU combinations have not all been tested. SimpleCV is excluded.
+**Optional additions:** Choose [PyTorch CPU or CUDA](docs/configuration.md#optional-pytorch) through the installer configuration. Torchvision, LightGBM and Pingouin can also be requested. Native PyTorch installation and CUDA acceptance are pending.
 
 ## ⚙️ Configuration
 

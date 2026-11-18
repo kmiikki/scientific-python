@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import shlex
+import stat
 import subprocess
 import sys
 import tarfile
@@ -247,36 +248,101 @@ def guard_root(root, home=None, allow_new=False, existing=False):
     return root
 
 
+def ownership_file(path, *, package_metadata=False):
+    """Read user-owned evidence and ensure the file identity remains stable."""
+    safety.plain_path(path)
+    info = path.lstat()
+    writable_mask = 0o002 if package_metadata else 0o022
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & writable_mask or info.st_nlink != 1:
+        raise InstallError('Unsafe permissions or file type for ownership evidence: ' + str(path))
+    content, identity, mode = safety.read_regular(path)
+    if identity != (info.st_dev, info.st_ino) or mode != stat.S_IMODE(info.st_mode):
+        raise InstallError('Ownership evidence changed while being read: ' + str(path))
+    return content
+
+
+def ownership_json(path):
+    value = json.loads(ownership_file(path))
+    if not isinstance(value, dict):
+        raise InstallError('Expected an ownership object: ' + str(path))
+    return value
+
+
+def verify_legacy_science(root, prefix, receipt):
+    state_path = root / '.scientific-python-installer-state'
+    if not os.path.lexists(state_path):
+        raise InstallError('Legacy environment ownership requires the completed installer state.')
+    pairs = [line.split('=', 1) for line in ownership_file(state_path).decode().splitlines() if '=' in line]
+    state = dict(pairs)
+    expected = {'managed_by': safety.PRODUCT, 'root': str(root), 'science': str(prefix),
+                'status': 'complete', 'micromamba_exe': receipt['micromamba_exe']}
+    if len(state) != len(pairs) or any(state.get(key) != value for key, value in expected.items()):
+        raise InstallError('Legacy installer state disagrees with the environment ownership receipt.')
+    if not re.fullmatch(r'[0-9a-f]{64}', state.get('release_fingerprint', '')):
+        raise InstallError('Legacy installer state lacks its release fingerprint.')
+    safety.plain_path(prefix / 'conda-meta')
+    if not ownership_file(prefix / 'conda-meta/history', package_metadata=True).strip():
+        raise InstallError('Legacy environment lacks a populated Conda history.')
+    installed = {}
+    for file in (prefix / 'conda-meta').glob('*.json'):
+        record = json.loads(ownership_file(file, package_metadata=True))
+        name = record.get('name') if isinstance(record, dict) else None
+        if not isinstance(name, str) or not name or name in installed:
+            raise InstallError('Legacy environment contains ambiguous Conda package records.')
+        installed[name] = record
+    if not installed or state.get('package_fingerprint') != package_fingerprint(installed):
+        raise InstallError('Legacy installed packages disagree with the completed installer state.')
+
+
 def owned_science(root):
     root = Path(root)
     prefix = root / 'envs/science'
     receipt_path = root / '.science-env-owner.json'
     owner_path = prefix / '.science-owner.json'
-    receipt = None
-    for path in [receipt_path, owner_path]:
-        if os.path.lexists(path):
-            value = safety.json_regular(path)
-            if value.get('managed_by') != 'scientific-python-ubuntu' or value.get('root') != str(root):
-                raise InstallError('Conflicting environment ownership metadata.')
-            if path == receipt_path: receipt = value
-    if owner_path.is_file(): return True
-    if receipt and receipt.get('prefix') == str(prefix):
-        if not prefix.exists(): return True  # Own reports/reservation, no environment to alter.
-        # Only an empty downloader-created skeleton is authorized by a reservation.
-        # A device/inode tuple or package fingerprint is not durable ownership:
-        # directory identities can be reused, and unrelated envs can have identical packages.
-        if receipt.get('phase') == 'download' and receipt.get('prefix_identity') is None:
-            paths = {str(item.relative_to(prefix)) for item in prefix.rglob('*')}
-            allowed = {'conda-meta', 'conda-meta/history'}
-            history = prefix / 'conda-meta/history'
-            return paths <= allowed and not history.is_symlink() and (not history.exists() or safety.read_regular(history)[0] == b'')
-    return False
+    safety.plain_path(prefix, missing=True)
+    if not os.path.lexists(receipt_path):
+        return False
+    receipt = ownership_json(receipt_path)
+    expected = {'managed_by': safety.PRODUCT, 'scope': 'science-environment',
+                'root': str(root), 'prefix': str(prefix)}
+    if any(receipt.get(key) != value for key, value in expected.items()):
+        raise InstallError('Environment ownership receipt has a different root, prefix or scope.')
+    phase = receipt.get('phase')
+    executable = receipt.get('micromamba_exe')
+    if phase not in ('download', 'transaction', 'installed') or not isinstance(executable, str) or not Path(executable).is_absolute():
+        raise InstallError('Environment ownership receipt has an invalid phase or executable path.')
+    if not prefix.exists():
+        return True  # Scope covers the installer receipt only.
+    info = prefix.stat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o002:
+        raise InstallError('Science directory ownership or permissions are ambiguous.')
+    identity = receipt.get('prefix_identity')
+    if not (phase == 'download' and identity is None) and identity != [info.st_dev, info.st_ino]:
+        raise InstallError('Science directory identity differs from the ownership receipt.')
+    has_marker = os.path.lexists(owner_path)
+    if has_marker and ownership_json(owner_path) != {'managed_by': safety.PRODUCT, 'root': str(root)}:
+        raise InstallError('Science directory marker disagrees with the environment ownership receipt.')
+    if phase == 'download':
+        # The downloader reservation authorizes only an empty environment skeleton.
+        allowed = {'conda-meta', 'conda-meta/history', '.science-owner.json'}
+        paths = set()
+        for item in prefix.rglob('*'):
+            safety.plain_path(item)
+            paths.add(str(item.relative_to(prefix)))
+        history = prefix / 'conda-meta/history'
+        return paths <= allowed and (not history.exists() or ownership_file(history, package_metadata=True) == b'')
+    if has_marker:
+        return True
+    if phase != 'installed':
+        raise InstallError('Interrupted Science transaction lacks its directory ownership marker.')
+    verify_legacy_science(root, prefix, receipt)
+    return True
 
 
 def guard_science(root):
     prefix = Path(root) / 'envs/science'
     if prefix.exists() and not owned_science(root):
-        raise InstallError('science exists without installer ownership; nothing was overwritten.')
+        raise InstallError('Science ownership is unverified. A matching .science-env-owner.json receipt is required; the environment was preserved.')
 
 
 def approve_plan(plan, before, after):
@@ -492,6 +558,17 @@ def sync(root, config, runner=run_process, home=None, mm=None, existing=False, r
         previous_requests = history_specs(prefix)
         intent = (set(before) if previous_requests is None else previous_requests) | {spec_name(s) for s in specs(config)}
         requested = specs(config, before)
+        names = {spec_name(spec) for spec in requested}
+        if 'pytorch-gpu' in names:
+            nvidia_smi = shutil.which('nvidia-smi')
+            if not nvidia_smi:
+                raise InstallError('The requested CUDA PyTorch build requires a working NVIDIA driver.')
+            devices = runner([nvidia_smi, '-L'], env=env, timeout=15)
+            if devices.returncode or not re.search(r'^GPU \d+:', devices.stdout, re.MULTILINE):
+                raise InstallError('NVIDIA device discovery failed before solving the CUDA PyTorch request.')
+            print('PyTorch backend requested: CUDA. Micromamba will solve against the detected driver.', flush=True)
+        elif 'pytorch-cpu' in names:
+            print('PyTorch backend requested: CPU.', flush=True)
         command = 'update' if before else 'create'
         argv = [mm, command, '--no-rc', '-r', root, '-p', prefix, '--override-channels', *[arg for channel in config['Channels'] for arg in ['-c', channel]],
                 '--strict-channel-priority', '--no-pyc', '--json']
@@ -567,6 +644,8 @@ def sync(root, config, runner=run_process, home=None, mm=None, existing=False, r
         def prepare_prefix():
             check_state()
             prefix.mkdir(parents=True, exist_ok=True)
+            info = prefix.stat()
+            claim['prefix_identity'] = [info.st_dev, info.st_ino]
             (prefix / 'conda-meta').mkdir(exist_ok=True)
             safety.plain_path(prefix / 'conda-meta/history', missing=True)
             if not (prefix / 'conda-meta/history').exists(): (prefix / 'conda-meta/history').touch()
@@ -898,21 +977,10 @@ def using_science(prefix):
 
 def removal_ownership(root):
     root = Path(root)
-    prefix = root / 'envs/science'
-    receipt = root / '.science-env-owner.json'
-    owner = prefix / '.science-owner.json'
-    proofs = []
-    for path in [receipt, owner]:
-        if os.path.lexists(path):
-            value = safety.json_regular(path)
-            if value.get('managed_by') != 'scientific-python-ubuntu' or value.get('root') != str(root):
-                raise InstallError('Conflicting environment ownership proof; science is preserved.')
-            proofs.append(path)
-    if prefix.exists() and not owned_science(root):
-        raise InstallError('No reliable ownership proof for this science directory; no deletion allowed.')
-    if not prefix.exists() and not proofs:
-        return False
-    return True
+    guard_science(root)
+    if (root / 'envs/science').exists():
+        return True
+    return owned_science(root)
 
 
 REMOVAL_STAGES = ('Checking removal targets', 'Checking active processes', 'Removing science environment',

@@ -25,6 +25,8 @@ For an existing Scientific Python installation, retain its root with **Existing*
 
 The active JSON is created or safely migrated before package changes. A new configuration contains 42 direct requests. An existing user configuration is preserved and is not merged with new defaults.
 
+The installer verifies ownership of `envs/science` independently of the Micromamba root. An Existing installation can manage its own Science environment while preserving the root and other environments. For an older installation missing the in-prefix marker, the installer checks the environment receipt, directory identity, completed installer state and installed package fingerprint. If the environment receipt is missing or the evidence disagrees, the installer preserves the environment and reports the missing proof.
+
 Review the selected executable, root, Science prefix, launcher locations and resolved package changes. After approval the existing locked transaction path stages verified archives and compares native preflight/commit identities. Bootstrap downloads are checked against immutable release metadata. Incompatible dependencies or uncertain ownership stop the operation.
 
 The default environment is `~/micromamba/envs/science`. The package manager resolves transitive dependencies automatically. No administrator rights are needed for the normal workflow.
@@ -47,3 +49,10 @@ The menu also provides:
 - **I — Info**, **D — Diagnostics**, **V — Validation only**.
 
 Close Spyder, kernels and active Science shells before removal/update. Read the target path before confirming. A supervised remove/install acceptance test must preserve all other environments.
+
+
+## Ubuntu 26.04 acceptance
+
+After the approved `main` update, use **Code → Download ZIP** and record the commit being tested. On the HP Z240, check update, runtime imports, the launchers and Spyder's first console. Run removal and fresh-install verification against an explicitly approved test target with another environment present.
+
+On iridium, select **Existing** and verify the root, the Science prefix and the ownership evidence first. If the environment receipt is unavailable or conflicts with the directory identity, record that diagnostic and preserve the existing installation. Run the update only when ownership checks pass. Test optional CPU PyTorch through **Install/update** after its request is selected and the solver plan is approved.

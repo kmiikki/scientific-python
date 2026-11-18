@@ -22,7 +22,6 @@ $MicromambaRelease = $ScienceRelease.MicromambaRelease
 $MicromambaVersion = $ScienceRelease.MicromambaVersion
 $PythonSpec = $ScienceRelease.Python
 $SpyderSpec = $ScienceRelease.Spyder
-$EnvName = 'science'
 
 $common = Join-Path $PSScriptRoot 'science-common.ps1'
 if (-not (Test-Path -LiteralPath $common -PathType Leaf)) {
@@ -201,11 +200,13 @@ if (
 function Install-SpyderLauncher {
     param(
         [Parameter(Mandatory=$true)]
-        $Layout
+        $Layout,
+        [ValidateNotNullOrEmpty()]
+        [string]$SourceDirectory = $PSScriptRoot
     )
 
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'science-launcher-common.ps1') -Destination $Layout.Root -Force
-    $template = Join-Path $PSScriptRoot 'spyder-launcher.ps1'
+    Copy-Item -LiteralPath (Join-Path $SourceDirectory 'science-launcher-common.ps1') -Destination $Layout.Root -Force
+    $template = Join-Path $SourceDirectory 'spyder-launcher.ps1'
     if (-not (Test-Path -LiteralPath $template -PathType Leaf)) {
         Stop-Install "Spyder launcher template is missing: $template"
     }
@@ -301,9 +302,106 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$escapedLaunche
 }
 
 
-function Sync-ScienceEnvironment {
-    param($Layout, [string[]]$Packages, [string]$EnvName = 'science')
-    Invoke-ScienceEnvironmentSync -Layout $Layout -Packages $Packages
+function Set-ScienceFinalizationStage {
+    param($Layout,$State,[string]$Stage)
+    $State | Add-Member -NotePropertyName finalization_stage -NotePropertyValue $Stage -Force
+    Write-ScienceTransactionJson $Layout.State $State
+}
+
+function Complete-ScienceInstallation {
+    param($Layout,$State,[string]$RecoveryEvidence)
+
+    Set-ScienceFinalizationStage $Layout $State 'verified-packages'
+    $pythonExe = Join-Path $layout.Science 'python.exe'
+    if (-not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) {
+        Stop-Install "Python was not found in $($layout.Science)."
+    }
+
+    Write-Host ''
+    Write-Host 'Scientific imports are validated by science-runtime-check.py using the active configuration.'
+
+    Set-ScienceFinalizationStage $layout $state 'powershell-hook'
+    Install-PowerShellHook -Layout $layout
+
+    $patchScript = Join-Path $PSScriptRoot 'patch-opencl.ps1'
+    if (-not (Test-Path -LiteralPath $patchScript -PathType Leaf)) {
+        Stop-Install "OpenCL patch script is missing: $patchScript"
+    }
+
+    Write-Host ''
+    Set-ScienceFinalizationStage $layout $state 'opencl'
+    Write-Host 'Applying the OpenCL activation patch...'
+    Write-Host ''
+
+    try {
+        & $patchScript -Action Patch -EnvPath $layout.Science -Mode $layout.Mode
+    }
+    catch {
+        Stop-Install "OpenCL patch failed: $($_.Exception.Message)"
+    }
+
+    Set-ScienceFinalizationStage $layout $state 'launchers'
+    Install-SpyderLauncher -Layout $layout -SourceDirectory $PSScriptRoot
+
+    # Keep support probes available independently of the extracted installer ZIP.
+    foreach ($line in [IO.File]::ReadAllLines((Join-Path $PSScriptRoot 'SHA256SUMS.txt'))) {
+        $name=($line -split '  ',2)[1]
+        $source=Join-Path $PSScriptRoot $name
+        if ($name.StartsWith('shared/')) {$source=Join-Path (Get-ScienceSharedDirectory) $name.Substring(7)}
+        $destination=Join-Path $layout.Root $name
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
+        Copy-Item -LiteralPath $source -Destination $destination -Force
+    }
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'SHA256SUMS.txt') -Destination $layout.Root -Force
+    Set-ScienceFinalizationStage $layout $state 'runtime'
+    $pathBeforeRuntime = $env:Path
+    try {
+        . (Join-Path $PSScriptRoot 'science-launcher-common.ps1')
+        $env:Path = Get-ScienceSpyderPath -OriginalPath $env:Path -Science $layout.Science
+        & $pythonExe (Join-Path $PSScriptRoot 'science-runtime-check.py') --prefix $layout.Science --output (Join-Path $layout.Root 'science-runtime.json')
+        if ($LASTEXITCODE -ne 0) { Stop-Install 'Runtime/media checks failed. Run menu D for a redacted report.' }
+        $runtimeResult=Read-ScienceJson (Join-Path $layout.Root 'science-runtime.json')
+        Write-Host ('Requested packages/imports: '+$runtimeResult.package_selection.status)
+        Write-Host ('Release defaults not requested: '+($runtimeResult.package_selection.release_not_requested -join ', '))
+        Write-Host ('Release defaults not installed: '+($runtimeResult.package_selection.release_not_installed -join ', '))
+    } finally { $env:Path = $pathBeforeRuntime }
+    # Preserve the exact solved package records locally; this manifest contains no user paths.
+    $manifest = & $layout.Micromamba list --no-rc -r $layout.Root -p $layout.Science --json
+    if ($LASTEXITCODE -ne 0) { Stop-Install 'Could not capture the installed package manifest.' }
+    [IO.File]::WriteAllText((Join-Path $layout.Root 'science-packages.json'), ($manifest -join "`n"), (New-Object Text.UTF8Encoding($false)))
+
+    if ($state) {
+        $state | Add-Member -NotePropertyName layout_mode -NotePropertyValue $layout.Mode -Force
+        $state | Add-Member -NotePropertyName micromamba_version -NotePropertyValue $MicromambaVersion -Force
+        $state | Add-Member -NotePropertyName python_spec -NotePropertyValue $PythonSpec -Force
+        $state | Add-Member -NotePropertyName spyder_version -NotePropertyValue $SpyderSpec -Force
+        $nowUtc = [DateTime]::UtcNow.ToString('o')
+
+        if (
+            -not ($state.PSObject.Properties.Name -contains 'installed_utc') -or
+            [string]::IsNullOrWhiteSpace([string]$state.installed_utc) -or
+            -not $scienceExistedBefore
+        ) {
+            $state | Add-Member -NotePropertyName installed_utc -NotePropertyValue $nowUtc -Force
+        }
+
+        $state | Add-Member -NotePropertyName last_sync_utc -NotePropertyValue $nowUtc -Force
+        $state | Add-Member -NotePropertyName package_policy -NotePropertyValue 'latest-compatible-unless-pinned' -Force
+        $launcherPaths = Get-ScientificPythonSpyderLauncherPaths -Layout $layout
+        $state | Add-Member -NotePropertyName installer_version -NotePropertyValue $ScienceRelease.Version -Force
+        $state | Add-Member -NotePropertyName installer_revision -NotePropertyValue $ScienceRelease.Revision -Force
+        $state | Add-Member -NotePropertyName spyder_launcher_version -NotePropertyValue 2 -Force
+        $state | Add-Member -NotePropertyName spyder_launcher_script -NotePropertyValue $launcherPaths.Script -Force
+        $state | Add-Member -NotePropertyName spyder_launcher_command -NotePropertyValue $launcherPaths.Command -Force
+        $state | Add-Member -NotePropertyName spyder_launcher_shortcut -NotePropertyValue $launcherPaths.Shortcut -Force
+        $ownerId=if($state.science_owner_id){$state.science_owner_id}else{[Guid]::NewGuid().ToString('N')}
+        $marker=Join-Path $layout.Science '.science-environment-owner'
+        Assert-ScienceTransactionPath $marker
+        Write-ScienceTransactionJson $marker ([ordered]@{id=$ownerId;sid=$layout.Sid;prefix=$layout.Science})
+        $state | Add-Member -NotePropertyName science_owner_id -NotePropertyValue $ownerId -Force
+        $state | Add-Member -NotePropertyName recovery_evidence -NotePropertyValue $RecoveryEvidence -Force
+        Set-ScienceFinalizationStage $layout $state 'complete'
+    }
 }
 
 try {
@@ -346,6 +444,9 @@ Write-Host ''
 if (-not (Test-Path -LiteralPath $layout.Root -PathType Container)) {
     Stop-Install 'The selected micromamba root does not exist. Run Windows preparation first.'
 }
+
+try { $null=Get-SciencePreparedInstallationState $layout }
+catch { Stop-Install $_.Exception.Message }
 
 Write-Host 'Checking write access...'
 Write-Host ''
@@ -516,90 +617,12 @@ $packages = @(Get-SciencePackageSpecs)
 $scienceExistedBefore = Test-Path -LiteralPath $layout.Science -PathType Container
 
 try {
-    Sync-ScienceEnvironment -Layout $layout -Packages $packages -EnvName $EnvName
+    Invoke-ScienceEnvironmentSync -Layout $layout -Packages $packages -AfterSync {
+        param($PreparedState,$RecoveryEvidence)
+        Complete-ScienceInstallation -Layout $layout -State $PreparedState -RecoveryEvidence $RecoveryEvidence
+    }
 } catch { Stop-Install $_.Exception.Message }
 
-$pythonExe = Join-Path $layout.Science 'python.exe'
-if (-not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) {
-    Stop-Install "Python was not found in $($layout.Science)."
-}
-
-Write-Host ''
-Write-Host 'Scientific imports are validated by science-runtime-check.py using the active configuration.'
-
-Install-PowerShellHook -Layout $layout
-
-$patchScript = Join-Path $PSScriptRoot 'patch-opencl.ps1'
-if (-not (Test-Path -LiteralPath $patchScript -PathType Leaf)) {
-    Stop-Install "OpenCL patch script is missing: $patchScript"
-}
-
-Write-Host ''
-Write-Host 'Applying the OpenCL activation patch...'
-Write-Host ''
-
-try {
-    & $patchScript -Action Patch -EnvPath $layout.Science -Mode $layout.Mode
-}
-catch {
-    Stop-Install "OpenCL patch failed: $($_.Exception.Message)"
-}
-
-Install-SpyderLauncher -Layout $layout
-
-# Keep support probes available independently of the extracted installer ZIP.
-foreach ($line in [IO.File]::ReadAllLines((Join-Path $PSScriptRoot 'SHA256SUMS.txt'))) {
-    $name=($line -split '  ',2)[1]
-    $source=Join-Path $PSScriptRoot $name
-    if ($name.StartsWith('shared/')) {$source=Join-Path (Get-ScienceSharedDirectory) $name.Substring(7)}
-    $destination=Join-Path $layout.Root $name
-    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
-    Copy-Item -LiteralPath $source -Destination $destination -Force
-}
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'SHA256SUMS.txt') -Destination $layout.Root -Force
-$pathBeforeRuntime = $env:Path
-try {
-    . (Join-Path $PSScriptRoot 'science-launcher-common.ps1')
-    $env:Path = Get-ScienceSpyderPath -OriginalPath $env:Path -Science $layout.Science
-    & $pythonExe (Join-Path $PSScriptRoot 'science-runtime-check.py') --prefix $layout.Science --output (Join-Path $layout.Root 'science-runtime.json')
-    if ($LASTEXITCODE -ne 0) { Stop-Install 'Runtime/media checks failed. Run menu D for a redacted report.' }
-    $runtimeResult=Read-ScienceJson (Join-Path $layout.Root 'science-runtime.json')
-    Write-Host ('Requested packages/imports: '+$runtimeResult.package_selection.status)
-    Write-Host ('Release defaults not requested: '+($runtimeResult.package_selection.release_not_requested -join ', '))
-    Write-Host ('Release defaults not installed: '+($runtimeResult.package_selection.release_not_installed -join ', '))
-} finally { $env:Path = $pathBeforeRuntime }
-# Preserve the exact solved package records locally; this manifest contains no user paths.
-$manifest = & $layout.Micromamba list -p $layout.Science --json
-if ($LASTEXITCODE -ne 0) { Stop-Install 'Could not capture the installed package manifest.' }
-[IO.File]::WriteAllText((Join-Path $layout.Root 'science-packages.json'), ($manifest -join "`n"), (New-Object Text.UTF8Encoding($false)))
-
-$state = Read-ScienceState -Layout $layout
-if ($state) {
-    $state | Add-Member -NotePropertyName layout_mode -NotePropertyValue $layout.Mode -Force
-    $state | Add-Member -NotePropertyName micromamba_version -NotePropertyValue $MicromambaVersion -Force
-    $state | Add-Member -NotePropertyName python_spec -NotePropertyValue $PythonSpec -Force
-    $state | Add-Member -NotePropertyName spyder_version -NotePropertyValue $SpyderSpec -Force
-    $nowUtc = [DateTime]::UtcNow.ToString('o')
-
-    if (
-        -not ($state.PSObject.Properties.Name -contains 'installed_utc') -or
-        [string]::IsNullOrWhiteSpace([string]$state.installed_utc) -or
-        -not $scienceExistedBefore
-    ) {
-        $state | Add-Member -NotePropertyName installed_utc -NotePropertyValue $nowUtc -Force
-    }
-
-    $state | Add-Member -NotePropertyName last_sync_utc -NotePropertyValue $nowUtc -Force
-    $state | Add-Member -NotePropertyName package_policy -NotePropertyValue 'latest-compatible-unless-pinned' -Force
-    $launcherPaths = Get-ScientificPythonSpyderLauncherPaths -Layout $layout
-    $state | Add-Member -NotePropertyName installer_version -NotePropertyValue $ScienceRelease.Version -Force
-    $state | Add-Member -NotePropertyName installer_revision -NotePropertyValue $ScienceRelease.Revision -Force
-    $state | Add-Member -NotePropertyName spyder_launcher_version -NotePropertyValue 2 -Force
-    $state | Add-Member -NotePropertyName spyder_launcher_script -NotePropertyValue $launcherPaths.Script -Force
-    $state | Add-Member -NotePropertyName spyder_launcher_command -NotePropertyValue $launcherPaths.Command -Force
-    $state | Add-Member -NotePropertyName spyder_launcher_shortcut -NotePropertyValue $launcherPaths.Shortcut -Force
-    Write-ScienceState -Layout $layout -State $state
-}
 
 Write-Host ''
 Write-Host 'Scientific Python installation/update completed successfully.' -ForegroundColor Green

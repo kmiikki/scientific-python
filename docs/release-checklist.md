@@ -1,41 +1,30 @@
-# v0.1.0 Development Release checklist
+# Development and publication
 
-## Preparation
+GitHub’s default branch, `main`, tracks the current development state. Work directly on local `main` and stage, review and commit in small, focused changes. Run relevant tests and preserve the installer’s transaction and ownership safety checks. Record known defects and pending platform acceptance.
 
-- [x] Shared default remains 42 direct requests; no unsolicited package additions or Bleach pins.
-- [x] Safe migration and user-editable JSON remain separate from immutable manifests.
-- [x] Windows approval is bound to an exact plan and checked offline execution path.
-- [x] Existing Ubuntu path reviewed without changing a live environment.
-- [x] Required automated regressions and focused transaction tests passed.
-- [x] Science activation/Spyder sibling-import fix: isolated regressions and real Micromamba activation/deactivation in a temporary root and a real headless Science kernel passed; existing installations were preserved.
-- [x] English README, platform guides, configuration and technical documentation prepared.
-- [x] MIT text and third-party scope reviewed.
-- [x] Final public-file, relative-link, secret/path and extracted-distribution audit recorded.
-- [x] First local Git commit prepared and recorded by delivery; no remote publication.
+## Development session
 
-- [x] Opt-in default additions and separate effective/default coverage implemented and tested in synthetic roots.
-- [ ] User performs the [seven-package Ubuntu 24.04 update acceptance](release-package-upgrade.md#final-ubuntu-2404-acceptance).
+Begin in the canonical checkout on `main` with a fast-forward-only update.
 
-## User review before publication
+```bash
+git fetch origin
+git pull --ff-only origin main
+```
 
-- [ ] Review [README](../README.md), all `docs/` Markdown, [changelog](../CHANGELOG.md) and [third-party notices](../THIRD_PARTY_NOTICES.md).
-- [ ] Review the final change list and local Git commit.
-- [ ] Decide whether pending native acceptance permits a clearly labelled development release.
-- [ ] Give separate explicit approval for creating a GitHub repository/pushing/publishing.
+During development, stage selected files and review the staged diff. Commit locally once the changes form a coherent unit. Work in progress can remain staged or unstaged.
 
-## Supervised native acceptance — do not pre-mark passed
+```bash
+git add -- README.md docs/release-checklist.md
+git diff --cached
+git commit -m "Describe the changes"
+```
 
-For Ubuntu 24.04, Ubuntu 26.04 and Windows 11 separately:
+At the end of the session, report the implementation, tests and commits queued for public `main`. Obtain explicit user approval before running `git push origin main`. Verify the remote commit after the push. GitHub repository settings changes also require explicit user approval.
 
-- [ ] Identify and verify the exact Science path and removal target; record other environments to preserve.
-- [ ] Remove only Science and install with the new source.
-- [ ] Start Spyder and the first IPython kernel.
-- [ ] Check NumPy, OpenCV/FFmpeg and imports of SHAP, PyWavelets, Optuna, Plotly, Hypothesis, Polars and XGBoost.
-- [ ] Check application/desktop/command launchers and persistence after signing in again.
-- [ ] Confirm other environments are unchanged.
+GitHub’s **Code → Download ZIP** downloads `scientific-python-main.zip` from the current default branch.
 
-Windows additionally requires native PowerShell 5.1, bootstrap, UAC/preparation and DLL/hook verification. Do not perform these destructive acceptance steps automatically on the development host.
+## Milestones
 
-## Publication boundary
+A version tag such as `v0.9.0` identifies an exact revision. Obtain separate explicit user approval before creating or pushing a release tag or creating, publishing, modifying, replacing or deleting a GitHub Release. Preserve published tags, artifacts and commit history.
 
-This preparation authorizes only a local repository and local commit. No GitHub repository, push, remote tag or release is authorized. Stop for user documentation review after delivering the local result.
+For an approved milestone, record its commit, the tests and platforms verified, and known limitations. Build the release archive from that commit and verify its contents and SHA-256 checksum.

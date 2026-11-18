@@ -2,13 +2,13 @@
 
 ## Acceptance pending
 
-The user has reported successful base Ubuntu 24.04 installation, Spyder/kernel and launcher acceptance. The [release-default addition follow-up](release-package-upgrade.md#final-ubuntu-2404-acceptance) still requires a manual seven-package update/import check. Earlier unaccepted items below describe the initial preparation evidence, not a claim that this user test was never performed.
+Niobium's existing Ubuntu 24.04 Science environment passed package imports, including all seven release additions, a headless Spyder IPython kernel, Qt6/OpenCV build checks and the lossless FFV1/MKV round trip. Graphical Spyder startup, the GUI-connected first console and a live installer update/removal remain pending for this development snapshot.
 
-The source targets Ubuntu 24.04 LTS, Ubuntu 26.04 LTS and Windows 11 x86-64. Native Ubuntu 26.04 and Windows 11/PowerShell 5.1 installation, removal, GUI/kernel and media acceptance remain pending. The current opt-in seven-package update requires its own Ubuntu 24.04 acceptance even though the user has already accepted the base environment.
+The earlier HP Z240 Ubuntu 26.04.1 fresh installation succeeded in an existing root. The updated ownership path still needs native acceptance on that machine. The iridium evidence contains a completed state and installed package inventory. Its collected environment ownership receipt is missing, so update and removal remain blocked until matching environment-specific proof is available.
 
-PowerShell 7.4.6 tests on Linux establish parser/helper and package-execution contract behavior. They do not establish native Windows filesystem, UAC, DLL, hook or PowerShell 5.1 acceptance. The native Micromamba contract tests install only inert synthetic noarch packages in temporary directories, with Windows target selection. They do not run Windows binaries on Linux.
+Windows 11 acceptance of the integrated installer, including recovery, OpenCL and launcher behavior, is pending. Earlier Windows testing verified the standalone desktop and command-launcher repair. The Start-menu launcher needs separate verification. Linux PowerShell and inert Micromamba fixtures cover the transaction contract and helper logic.
 
-The [Spyder startup follow-up](spyder-startup-fix.md) passed a real headless Science kernel and temporary-profile interpreter configuration check. It does not certify GUI startup or the GUI-connected first console. This source-only delivery leaves existing installed support files unchanged.
+The Windows OpenCV 5.1.0 test used HDF5 1.14.6. With that runtime the HDF5 2.2.0 `libver='latest'` sample failed to read with `bad version number for layout message`. Other HDF5 and scientific data operations passed in that run. Keep source samples read-only when checking compatibility.
 
 ## Configuration and updates
 
@@ -17,7 +17,7 @@ The [Spyder startup follow-up](spyder-startup-fix.md) passed a real headless Sci
 - There is one active per-user configuration per platform, not independent root profiles.
 - Removing a request does not automatically uninstall its package. No Synchronize, package ownership or pending-retirement feature is included.
 - Legacy native package-history restrictions may produce a solver conflict. Such conflicts stop; they are not bypassed by guessing old user intent.
-- Optional PyTorch/torchvision/LightGBM/Pingouin combinations and CUDA support have not all been tested. No new broad solver matrix was run for release preparation.
+- Optional PyTorch is requested explicitly through the package configuration. CPU and CUDA checks run with the selected build. Native installation and CUDA acceptance on the supported platforms are pending.
 - Bleach/tinycss2 selection depends on the full solver result and upstream metadata. There is no new permanent Bleach or tinycss2 pin.
 
 ## Transaction boundaries

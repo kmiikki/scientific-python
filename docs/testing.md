@@ -58,4 +58,4 @@ The earlier bounded package-selection and Bleach investigation evidence remains 
 - Full scientific environment installation during this preparation.
 - Optional-package combination matrix, broad CUDA/GPU testing or synchronization/retirement tests.
 
-These remain explicit manual release checks in the [release checklist](release-checklist.md).
+Record the status of these platform checks with the milestone under the [development and publication policy](release-checklist.md).
