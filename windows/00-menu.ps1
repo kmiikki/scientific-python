@@ -107,6 +107,8 @@ function Show-Info {
     }
     Write-Host ''
 
+    Write-Host "Scientific Python $($ScienceRelease.InstallerVersion)"
+    Write-Host "Installer layout lineage: V$($ScienceRelease.Version) r$($ScienceRelease.Revision)"
     Write-Host 'Menu actions'
     Write-Host '------------'
     Write-Host ''
@@ -173,7 +175,8 @@ function Invoke-Step {
         [Parameter(Mandatory=$true)]
         [string]$ScriptName,
 
-        [string]$ExtraCommand = ''
+        [string]$ExtraCommand = '',
+        [int]$AllowedExitCode = 0
     )
 
     $scriptPath = Join-Path $BaseDir $ScriptName
@@ -222,7 +225,7 @@ exit `$rc
         -NoNewWindow -Wait -PassThru -ErrorAction Stop
     $rc = $process.ExitCode
 
-    if ($rc -ne 0 -and $rc -ne 10) {
+    if ($rc -ne 0 -and $rc -ne 10 -and $rc -ne $AllowedExitCode) {
         Write-Host ''
         Write-Host "$ScriptName returned error code $rc." -ForegroundColor Red
         Write-Host 'Use D in the menu for a redacted diagnostic report.'
@@ -238,7 +241,7 @@ function Pause-Menu {
 
 while ($true) {
     Clear-Host
-    Write-Host "Windows - Scientific Python V$($ScienceRelease.Version) r$($ScienceRelease.Revision)"
+    Write-Host "Windows - Scientific Python $($ScienceRelease.InstallerVersion)"
     Write-Host '==========================='
     Write-Host ''
     Show-State
@@ -255,6 +258,7 @@ while ($true) {
     Write-Host '  5  Remove the science environment'
     Write-Host '  6  Total Remove: entire verified Micromamba root and its environments'
     Write-Host ''
+    Write-Host '  U  USB Camera Test (optional)'
     Write-Host '  D  Diagnostics (redacted)'
     Write-Host '  I  Info'
     Write-Host '  Q  Quit'
@@ -364,6 +368,12 @@ while ($true) {
 
         '^6$' {
             [void](Invoke-Step '05-remove-micromamba.ps1')
+            Pause-Menu
+            continue
+        }
+
+        '^(?i:u|usb camera test)$' {
+            [void](Invoke-Step '07-usb-camera-test.ps1' "-Mode '$Mode'" -AllowedExitCode 2)
             Pause-Menu
             continue
         }

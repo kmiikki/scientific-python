@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive V4-r5.2 workflow with approved user-local maintenance."""
+"""Scientific Python installer with approved user-local maintenance."""
 import argparse
 import datetime
 import contextlib
@@ -486,7 +486,7 @@ def remove_action(root, mm, home, reader=input):
     with log.open('x') as stream:
         os.chmod(log, 0o600);sys.stdout, sys.stderr = Tee(old_out, stream), Tee(old_err, stream)
         try:
-            print('Scientific Python Ubuntu V4-r5.2 — science removal')
+            print('Scientific Python Ubuntu — science removal')
             print('Selected environment: ' + str(root / 'envs/science'))
             if not recheck_usage(root / 'envs/science', 'removed', reader):
                 result.update(usage=m.processes.inspect(root / 'envs/science'),instruction='Resolve the listed science users and run removal again. No deletion was started.');return 2
@@ -580,7 +580,7 @@ def preflight(mode, root, mm, config, shortcut, validate=False):
     values = current_versions(root, mm)
     installed = m.records(root / 'envs/science')
     action = 'Validation only' if validate else ('Update' if installed else 'Fresh installation')
-    print('\nScientific Python Ubuntu V4-r5.2\n' + '=' * 35)
+    print(f"\nScientific Python {config['InstallerVersion']} (Ubuntu)\n" + '=' * 35)
     print('Ubuntu            : ' + platform.freedesktop_os_release().get('VERSION_ID', 'unknown'))
     print('Architecture      : ' + platform.machine())
     print('Operation         : ' + action)
@@ -709,8 +709,8 @@ def run_runtime(root, mm):
     return report
 
 
-def summary(mode, root, mm, status, runtime, launchers, shortcut, log, report, package_status, other_environments="PENDING"):
-    print('\nScientific Python Ubuntu V4-r5.2\n' + '=' * 32)
+def summary(mode, root, mm, status, runtime, launchers, shortcut, log, report, package_status, other_environments="PENDING", *, release_version):
+    print(f'\nScientific Python {release_version} (Ubuntu)\n' + '=' * 32)
     print('Installation status: ' + status)
     print('Package installation: ' + package_status)
     print('Automatic tests     : ' + runtime.get('status', 'SKIP'))
@@ -783,7 +783,49 @@ def select_optional_packages(reader=None, output=print):
     return True
 
 
+def camera_launcher(arguments):
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--root', type=Path, help='Select a detected Micromamba root.')
+    args, camera_args = parser.parse_known_args(arguments)
+    camera = m.science_config.shared(BUNDLE) / 'science-camera.py'
+    if '-h' in camera_args or '--help' in camera_args:
+        print('Ubuntu launcher: --root PATH selects a detected Science installation.', flush=True)
+        os.execv(sys.executable, [sys.executable, '-IB', str(camera), '--help'])
+    m.platform_guard()
+    detected = detect()
+    roots = [Path(root) for root in detected['prior']]
+    if args.root is not None:
+        root = args.root.expanduser()
+        if root not in roots:
+            raise m.InstallError('Select an existing detected Science root with --root.')
+    elif len(roots) == 1:
+        root = roots[0]
+    elif len(roots) > 1:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()) or any(
+                arg == '--json' or arg == '--list' or arg == '--all' or arg.startswith('--device') for arg in camera_args):
+            raise m.InstallError('Several Science installations detected. Select one with --root PATH.')
+        root, _ = select_inventory_root(detected)
+        if root is None:
+            print('Camera test: SKIP (USER_CANCELLED)')
+            return 2
+        if root not in roots:
+            raise m.InstallError('The selected root has no Science environment.')
+    else:
+        print('Install Scientific Python first.', file=sys.stderr)
+        return 1
+    prefix = root / 'envs/science'
+    python = prefix / 'bin/python'
+    m.safety.plain_path(prefix)
+    if not python.is_file() or not python.resolve().is_relative_to(prefix) or not os.access(python, os.X_OK):
+        raise m.InstallError('The selected Science Python interpreter is missing or redirected.')
+    env = os.environ.copy()
+    env['PATH'] = str(python.parent) + os.pathsep + env.get('PATH', '')
+    os.execve(python, [str(python), '-IB', str(camera), *camera_args, '--prefix', str(prefix)], env)
+
+
 def main():
+    if sys.argv[1:2] == ['camera']:
+        return camera_launcher(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', nargs='?', default='install', choices=['install', 'optional', 'validate', 'diagnostics', 'remove-science', 'remove-root', 'remove-settings', 'remove-total', 'info'])
     parser.add_argument('--output', type=Path)
@@ -792,7 +834,8 @@ def main():
     home = Path.home(); config = m.release()
     detected = detect(home)
     if args.action == 'info':
-        print('Scientific Python Ubuntu V4-r5.2; Ubuntu 24.04/26.04 x86-64')
+        print(f"Scientific Python {config['InstallerVersion']}; Ubuntu 24.04/26.04 x86-64")
+        print('Installer layout lineage: V4-r5.2')
         print('Default new root: ' + str(home / 'micromamba'))
         print('Science path: <selected root>/envs/science')
         print('Detected roots: ' + json.dumps(detected['roots']))
@@ -962,7 +1005,7 @@ def main():
             except Exception as report_error: print('Diagnostic collection FAIL: ' + str(report_error), file=sys.stderr)
         finally:
             session.close()
-            summary(mode, root, mm, result, runtime, launchers, shortcut_status, log, report_path, package_status, other_environments)
+            summary(mode, root, mm, result, runtime, launchers, shortcut_status, log, report_path, package_status, other_environments, release_version=config['InstallerVersion'])
             sys.stdout, sys.stderr = old_stdout, old_stderr
     # The menu remains open. Direct terminal invocations leave the summary visible.
     return 0 if result == 'SUCCESS' else 2 if result in ['PENDING', 'BLOCKED'] else 1

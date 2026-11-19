@@ -2,13 +2,17 @@
 
 ## Platform acceptance
 
-Niobium passed the Ubuntu 24.04 update of the existing Science environment, Spyder GUI and IPython, media checks, and PyTorch CUDA installation and computation. Fresh installation and removal for the current snapshot remain outside that acceptance. See the [native test results](testing.md#niobium-native-acceptance).
+For v0.9.0, Niobium passed the Ubuntu 24.04 update of the existing Science environment, Spyder GUI and IPython, media checks, and PyTorch CUDA installation and computation. Fresh installation and removal for the current snapshot remain outside that acceptance. See the [native test results](testing.md#niobium-native-acceptance).
 
 The earlier HP Z240 Ubuntu 26.04.1 fresh installation succeeded in an existing root. The updated ownership path still needs native acceptance on that machine. The iridium evidence contains a completed state and installed package inventory. Its collected environment ownership receipt is missing, so update and removal remain blocked until matching environment-specific proof is available.
 
 Windows 11 acceptance of the integrated installer, including recovery, OpenCL and launcher behavior, is pending. Earlier Windows testing verified the standalone desktop and command-launcher repair. The Start-menu launcher needs separate verification. Linux PowerShell and inert Micromamba fixtures cover the transaction contract and helper logic.
 
 The Windows OpenCV 5.1.0 test used HDF5 1.14.6. With that runtime the HDF5 2.2.0 `libver='latest'` sample failed to read with `bad version number for layout message`. Other HDF5 and scientific data operations passed in that run. Keep source samples read-only when checking compatibility.
+
+## USB camera hardware
+
+The v0.9.1 camera tests on physical systems are pending. DirectShow displays friendly names when the OpenCV backend supplies them. Fallback index probing shows indexes only and has a fixed discovery budget. Individual backends can hide the cause of an access failure. V4L2 reports kernel interfaces, so a single camera can appear under several nodes. See [camera testing](camera-testing.md) and the [acceptance matrix](testing.md#v091-camera-hardware-acceptance).
 
 ## Configuration and updates
 

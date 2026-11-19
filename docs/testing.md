@@ -1,5 +1,20 @@
 # Testing and acceptance
 
+## v0.9.1 camera hardware acceptance
+
+Physical capture and preview are separate from installer and runtime acceptance. Automated camera regressions use simulated devices and bounded worker processes.
+
+| Target | Required physical check | Status |
+|---|---|---|
+| Windows 11 workstation | DirectShow capture and preview in the installed Science environment | Pending |
+| Ubuntu 24.04 LTS, Niobium | V4L2 capture and preview | Pending |
+| Ubuntu 26.04 LTS, Iridium | V4L2 capture and preview | Pending |
+| Ubuntu 26.04 LTS, HP Z240 | Independent results for multiple devices where available. Verify any fingerprint-reader-like interface only if exposed as a video node. | Pending |
+
+Follow the [camera test instructions](camera-testing.md). Record the commit, backend, per-device status, observed resolution and preview result. Include a capture-only check and, if available, a functional camera alongside an unsupported or inaccessible device.
+
+The v0.9.1 automated run passed 93 Python tests. On Linux PowerShell 7.4.6, eleven PowerShell suites passed, including the inert Micromamba transaction test. The native-Windows launcher repair and NTFS whole-root removal suites could not complete on Linux and reproduced the same host limitations on the baseline. Both versioned ZIPs passed extraction and manifest verification. The Ubuntu launcher returned `SKIP (NO_CAMERA)` on Niobium. The installed Science environment was used for a device list and a read-only OpenCV backend check.
+
 ## Niobium native acceptance
 
 On 2026-11-18, the maintainer completed the minimum v0.9.0 native acceptance on Niobium with Ubuntu 24.04 LTS, using the existing Science environment and development revision `333feee`.
@@ -15,7 +30,7 @@ On 2026-11-18, the maintainer completed the minimum v0.9.0 native acceptance on 
 
 The installer reported CUDA **13.5** dependency compatibility. The installed PyTorch build reported **13.4** through `torch.version.cuda`. Both are the observed values from the same accepted workflow.
 
-Windows 11 and Ubuntu 26.04 native acceptance of the current snapshot remains pending. This Niobium test covers updating an existing environment. It leaves the fresh-install and removal paths for separate acceptance.
+This v0.9.0 Niobium test covers updating an existing environment. The fresh-install and removal paths have separate acceptance requirements.
 
 ## v0.9.0 regression history
 

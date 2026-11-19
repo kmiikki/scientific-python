@@ -435,7 +435,7 @@ try {
 }
 
 Write-Host ''
-Write-Host 'Scientific Python installer'
+Write-Host "Scientific Python $($ScienceRelease.InstallerVersion) installer"
 Write-Host '==========================='
 Write-Host ''
 Write-Host "Mode        : $($layout.Mode)"

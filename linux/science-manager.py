@@ -1671,7 +1671,7 @@ def apply_total_removal(root, home, approved, inventory):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['config', 'spyder-profile', 'guard-platform', 'bootstrap', 'sync', 'profile', 'artifacts', 'guard-root', 'guard-remove', 'diagnostics', 'verify-bundle', 'state', 'remove-science', 'remove-root', 'remove-settings', 'clean-launchers'])
+    parser.add_argument('action', choices=['config', 'release-version', 'spyder-profile', 'guard-platform', 'bootstrap', 'sync', 'profile', 'artifacts', 'guard-root', 'guard-remove', 'diagnostics', 'verify-bundle', 'state', 'remove-science', 'remove-root', 'remove-settings', 'clean-launchers'])
     parser.add_argument('--root', type=Path, default=Path.home() / 'micromamba')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--remove', action='store_true')
@@ -1679,6 +1679,10 @@ def main():
     args = parser.parse_args()
     if args.action == 'spyder-profile':
         print(prepare_spyder_profile(args.root)); return 0
+    if args.action == 'release-version':
+        verify_bundle()
+        print(science_config.read_json(BUNDLE / 'science-installer-release.json')['InstallerVersion'])
+        return 0
     config = release()
     if args.action == 'config':
         print('\t'.join(config[k] for k in ['InstallerVersion', 'MicromambaVersion', 'Python', 'Spyder']))

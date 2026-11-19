@@ -2,6 +2,10 @@
 
 Target: Windows 11 x86-64 and Windows PowerShell 5.1. Native acceptance is pending; read [limitations](known-limitations.md).
 
+## Optional USB camera test
+
+Select **U — USB Camera Test (optional)** or run `windows/07-TEST-USB-CAMERA.cmd`. The test uses DirectShow in the selected Home or Safe installation. Installation and ordinary validation can run without cameras. See [command-line selection, live preview and diagnostics](camera-testing.md).
+
 ## Start
 
 Keep `windows/` and `shared/` in the same extracted project folder. Double-click `windows/00-START-HERE.cmd`; it starts Windows PowerShell with a process-scoped execution-policy bypass. It does not require Python to validate configuration.

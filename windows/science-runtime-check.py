@@ -55,7 +55,7 @@ def package_selection(prefix,imports=(),records=None):
     return _package_report.coverage(_user,_DEFAULTS,package_records(prefix) if records is None else records,imports)
 
 
-def checks(prefix=None, gui=False, camera=None):
+def checks(prefix=None, gui=False):
     prefix = Path(prefix or sys.prefix).resolve()
     result = {'schema': 12, 'checks': {}, 'versions': {}, 'tools': {}, 'optional': {}}
     def check(name, fn):
@@ -151,20 +151,6 @@ def checks(prefix=None, gui=False, camera=None):
             finally: cv2.destroyAllWindows()
             return True
         check('highgui_window',window)
-    if camera is not None:
-        def capture():
-            cap=cv2.VideoCapture(camera,cv2.CAP_DSHOW)
-            try:
-                if not cap.isOpened(): return False
-                ok,frame=cap.read()
-                if not ok: return False
-                if gui:
-                    cv2.imshow('Scientific Python USB camera',frame)
-                    cv2.waitKey(1500)
-                    cv2.destroyAllWindows()
-                return True
-            finally: cap.release()
-        check('usb_camera_frame',capture)
     result['success']=all(v['status']=='PASS' for v in result['checks'].values())
     return result
 
@@ -173,9 +159,8 @@ if __name__=='__main__':
     parser.add_argument('--prefix')
     parser.add_argument('--output')
     parser.add_argument('--gui',action='store_true')
-    parser.add_argument('--camera',type=int)
     args=parser.parse_args()
-    try: result=checks(args.prefix,args.gui,args.camera)
+    try: result=checks(args.prefix,args.gui)
     except Exception as exc:
         result={'success':False,'error_type':type(exc).__name__,'package_selection':package_selection(Path(args.prefix or sys.prefix))}
     payload=json.dumps(result,ensure_ascii=True,indent=2)

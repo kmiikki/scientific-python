@@ -81,6 +81,16 @@ class UbuntuOwnershipTests(unittest.TestCase):
         with self.assertRaisesRegex(manager.InstallError, 'installed packages disagree'):
             manager.guard_science(self.root)
 
+    def test_existing_v090_ownership_records_remain_usable(self):
+        self.write_receipt()
+        self.write_state(installer_version='0.9.0-dev')
+        original = (self.state.read_bytes(), self.receipt.read_bytes())
+        self.assertEqual(manager.science_config.read_json(ROOT / 'linux/science-installer-release.json')['InstallerVersion'],
+                         '0.9.1')
+        self.assertTrue(manager.removal_ownership(self.root))
+        manager.guard_science(self.root)
+        self.assertEqual((self.state.read_bytes(), self.receipt.read_bytes()), original)
+
     def test_state_or_prefix_marker_alone_cannot_grant_ownership(self):
         for marker in (False, True):
             with self.subTest(marker=marker):

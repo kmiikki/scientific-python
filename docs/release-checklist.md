@@ -23,6 +23,10 @@ At the end of the session, report the implementation, tests and commits queued f
 
 GitHub’s **Code → Download ZIP** downloads `scientific-python-main.zip` from the current default branch.
 
+## Versioned installer archives
+
+From the verified source checkout on Ubuntu, run `python3 -B tools/build_distributions.py OUTPUT_DIRECTORY`. The builder checks both platform version declarations and the source and platform manifests. For v0.9.1 it produces `scientific-python-v0.9.1-linux.zip` and `scientific-python-v0.9.1-windows.zip`. Each archive contains its installer folder and the matching `shared/` folder. Unpack the whole archive before using the installer.
+
 ## Milestones
 
 A version tag such as `v0.9.0` identifies an exact revision. Obtain separate explicit user approval before creating or pushing a release tag or creating, publishing, modifying, replacing or deleting a GitHub Release. Preserve published tags, artifacts and commit history.

@@ -3,8 +3,9 @@ set -u
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=science-common.sh
 . "$SCRIPT_DIR/science-common.sh"
+version="$(python3 -B "$MANAGER" release-version)" || exit 1
 while true; do
-    printf '\nScientific Python Ubuntu LTS V4-r5.2\n1  Install/update Scientific Python\nO  Configure optional packages and install/update\n2  Remove Spyder settings\n3  Remove science\n4  Remove owned Micromamba executable (preserve root/cache)\n5  Total Remove: entire verified Micromamba root\nI  Info\nD  Diagnostics\nV  Validation only\nC  Package configuration location\nQ  Quit\n'
+    printf '\nScientific Python %s (Ubuntu LTS)\n1  Install/update Scientific Python\nO  Configure optional packages and install/update\n2  Remove Spyder settings\n3  Remove science\n4  Remove owned Micromamba executable (preserve root/cache)\n5  Total Remove: entire verified Micromamba root\nI  Info\nD  Diagnostics\nV  Validation only\nU  USB Camera Test (optional)\nC  Package configuration location\nQ  Quit\n' "$version"
     read -r -p 'Selection: ' choice || exit 0
     case "$choice" in
         1) script=01-install-science.sh ;;
@@ -15,6 +16,10 @@ while true; do
         5) python3 "$SCRIPT_DIR/science-install.py" remove-total; continue ;;
         i|I) show_info; continue ;;
         d|D) script=05-diagnostics.sh ;;
+        u|U)
+            bash "$SCRIPT_DIR/07-test-usb-camera.sh"
+            if (( $? == 1 )); then printf 'USB camera test failed.\n' >&2; fi
+            continue ;;
         v|V) python3 "$SCRIPT_DIR/science-install.py" validate; continue ;;
         c|C) python3 "$SCRIPT_DIR/science-config-info.py"; continue ;;
         q|Q) exit 0 ;;

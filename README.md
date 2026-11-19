@@ -8,7 +8,7 @@
 
 Set up a scientific Python workspace with **Spyder, JupyterLab, numerical tools, machine learning, image processing and video support**. A guided menu checks your setup, resolves dependencies and asks you to approve the package changes.
 
-**v0.9.0 development.** The current source integrates the Windows installer hotfixes and tightens Ubuntu legacy ownership checks. The existing-environment update, Spyder and PyTorch CUDA passed native acceptance on Niobium with Ubuntu 24.04. See [known limitations](docs/known-limitations.md) before installing.
+**v0.9.1 development.** The installer adds an optional [USB Camera Test](docs/camera-testing.md) on Ubuntu and Windows. USB cameras are optional. Scientific Python can be installed and used without any camera hardware. See [known limitations](docs/known-limitations.md) before installing.
 
 [Ubuntu guide](docs/ubuntu-installation.md) · [Windows guide](docs/windows-installation.md) · [Customize packages](docs/configuration.md) · [Development and releases](docs/release-checklist.md)
 
@@ -31,7 +31,7 @@ You do not need to learn Conda commands to use the installer. To customize the p
 
 | Platform | Target | Acceptance status |
 |---|---|---|
-| Ubuntu 24.04 LTS | x86-64, desktop session | Existing-environment update, runtime checks, Spyder GUI and PyTorch CUDA passed on Niobium. Fresh installation and removal for this snapshot remain outside that test. |
+| Ubuntu 24.04 LTS | x86-64, desktop session | Existing-environment update, runtime checks, Spyder GUI and PyTorch CUDA passed on Niobium for v0.9.0. v0.9.1 camera acceptance pending. |
 | Ubuntu 26.04 LTS | x86-64, desktop session | Earlier fresh installation passed. Current update and legacy ownership acceptance pending. |
 | Windows 11 | x86-64, Windows PowerShell 5.1 | Execution contract tested on Linux; native acceptance pending |
 
@@ -113,7 +113,7 @@ Removing a request from JSON stops requesting it. **This release does not automa
 
 ## 📝 Known Limitations
 
-Windows 11 and Ubuntu 26.04 native acceptance of the current snapshot is pending. The [Niobium acceptance results](docs/testing.md#niobium-native-acceptance) cover the existing Ubuntu 24.04 environment. Interrupted native package commits have no guaranteed automatic rollback. See [all limitations](docs/known-limitations.md), the [technical design](docs/architecture.md) and the [test report](docs/testing.md).
+Physical camera testing for v0.9.1 is pending. The [Niobium v0.9.0 acceptance results](docs/testing.md#niobium-native-acceptance) cover updating the existing Ubuntu 24.04 environment. Interrupted native package commits have no guaranteed automatic rollback. See [all limitations](docs/known-limitations.md), the [technical design](docs/architecture.md) and the [test report](docs/testing.md).
 
 ## 🤝 Contributing
 

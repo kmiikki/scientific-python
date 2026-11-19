@@ -102,7 +102,7 @@ class OptionalPackageTests(unittest.TestCase):
     def test_main_menu_routes_to_optional_action_and_rejects_redirected_input(self):
         result = subprocess.run(['bash', str(BUNDLE / '00-menu.sh')], input='O\nQ\n',
                                 capture_output=True, text=True, check=True)
-        self.assertIn('O  Optional packages', result.stdout)
+        self.assertIn('O  Configure optional packages and install/update', result.stdout)
         self.assertIn('Optional package selection requires an interactive terminal', result.stderr)
 
     def fixture_plan(self, build):

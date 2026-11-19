@@ -10,6 +10,6 @@
   "Revision": 2,
   "OpenCVMaxExclusive": "6",
   "FFmpegMaxExclusive": "10",
-  "InstallerVersion": "0.9.0-dev",
+  "InstallerVersion": "0.9.1",
   "FFmpegMinimum": "9.0.1"
 }

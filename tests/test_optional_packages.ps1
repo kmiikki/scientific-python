@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([string]$TempRoot=[IO.Path]::GetTempPath())
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
@@ -131,7 +131,7 @@ try {
         $backup=Join-Path (Split-Path -Parent $path) "science-release.pre-reset-$before.json"
         Check ((Get-ScienceFileSha256 $backup) -ceq $before) 'Reset backup did not preserve exact bytes.'
     }
-    Case 'normal-menu-dispatches-cpu-to-install-and-removal-back-to-menu' {
+    Case 'normal-menu-dispatches-optional-packages-and-camera-independently' {
         $menu=Join-Path $root 'windows/00-menu.ps1'
         $tokens=$null;$errors=$null
         $ast=[Management.Automation.Language.Parser]::ParseFile($menu,[ref]$tokens,[ref]$errors)
@@ -144,8 +144,9 @@ try {
         function Show-OtherInstallationSummary {}
         function Pause-Menu {}
         function Invoke-Step {
-            param($ScriptName,$ExtraCommand)
+            param($ScriptName,$ExtraCommand,$AllowedExitCode)
             $fixture.Steps+=("$ScriptName $ExtraCommand")
+            if ($ScriptName -eq '07-usb-camera-test.ps1') {return $AllowedExitCode}
             return 0
         }
         $Mode='Auto'
@@ -159,6 +160,10 @@ try {
         Answers @('r','y')
         & $stepper
         Check (-not $fixture.Steps.Count) 'Removing the request launched the installer.'
+        $choice='U'
+        $Mode='Safe'
+        & $stepper
+        Check ($fixture.Steps.Count -eq 1 -and $fixture.Steps[0] -ceq "07-usb-camera-test.ps1 -Mode 'Safe'") 'Camera test bypassed its standalone launcher or invoked another workflow.'
     }
     Case 'solver-rejects-opposite-build-before-approval' {
         $packages=@('python','python_abi','spyder','apache-arrow-proc','opencv','ffmpeg',"pytorch[build='cpu*']")

@@ -259,6 +259,23 @@ try {
             Assert-True ($specs.Count -eq 42)
         }finally{$env:LOCALAPPDATA=$previousLocal}
     }
+    Test-Case 'v0.9.1-release-preserves-saved-requests-and-layout-lineage' {
+        $previousLocal=$env:LOCALAPPDATA
+        try {
+            $env:LOCALAPPDATA=Join-Path $work 'camera-release'
+            $path=Get-ScienceConfigurationPath
+            $value=Get-ScienceDefaultConfiguration
+            $value.ScientificPackages+=@('pytorch=*=cpu*')
+            Put-Json $path $value
+            $before=Hash-File $path
+            $release=Get-ScienceEffectiveRelease
+            $ubuntu=Get-Content -LiteralPath (Join-Path $root 'linux/science-installer-release.json') -Raw | ConvertFrom-Json
+            Assert-True ($release.InstallerVersion -ceq '0.9.1' -and $release.InstallerVersion -ceq $ubuntu.InstallerVersion)
+            Assert-True ($release.Version -ceq '12' -and $release.Revision -eq 2)
+            Assert-True ($release.ScientificPackages -ccontains 'pytorch=*=cpu*')
+            Assert-True ((Hash-File $path) -eq $before)
+        } finally {$env:LOCALAPPDATA=$previousLocal}
+    }
     Test-Case 'release-upgrade-noninteractive-terminal-detection' {
         Assert-True (-not (Test-ScienceInteractiveConfiguration)) 'Redirected test input/output must not prompt'
     }

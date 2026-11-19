@@ -2,6 +2,10 @@
 
 Targets: Ubuntu 24.04 LTS and 26.04 LTS, x86-64. The existing-environment update and Spyder startup passed on Niobium with Ubuntu 24.04. Fresh-install and removal acceptance for the current snapshot are pending. The installer requires Bash, Ubuntu's system Python 3 and a supported desktop session for graphical launchers. The current platform check requires an ASCII account name.
 
+## Optional USB camera test
+
+Select **U — USB Camera Test (optional)** or run `bash linux/07-test-usb-camera.sh`. Ubuntu uses V4L2 and supports explicit video nodes and persistent `by-id` paths. Installation and ordinary validation can run without cameras. See [camera selection, live preview and diagnostics](camera-testing.md).
+
 ## Start
 
 Extract the entire project folder with both `linux/` and `shared/`. Open a terminal there and run:

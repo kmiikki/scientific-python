@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.9.1 development
+
+- Add the optional USB Camera Test to both installer menus and standalone launchers. Select one camera or test multiple devices independently using DirectShow on Windows and V4L2 on Ubuntu.
+- Classify unsupported V4L2 nodes, validate consecutive frames in bounded workers, and optionally show live preview. Include redacted JSON results for unattended checks.
+- Report Scientific Python 0.9.1 in both installers and generate versioned platform ZIPs with the camera test. Existing package configuration, layout identifiers and ownership evidence remain compatible.
+
 ## v0.9.0 development
 
 - Integrated the cumulative Windows installer fixes for channel arguments, approval, callback scope, contaminated native JSON output and standalone launcher repair.
