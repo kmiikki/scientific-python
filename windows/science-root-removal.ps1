@@ -5,48 +5,17 @@ function Initialize-ScienceRootNative {
     }
 }
 
-function Assert-ScienceRootAcl {
-    param([string]$Path,[switch]$Anchor,[switch]$CreatedSafeRoot)
-    $acl=Get-Acl -LiteralPath $Path -ErrorAction Stop
-    $sid=(Get-ScienceSidInfo).Sid
-    $writers=@($sid,'S-1-5-18','S-1-5-32-544')
-    if($Anchor){$writers+=,'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'}
-    if($writers -notcontains $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -or
-       (-not $Anchor -and -not $CreatedSafeRoot -and $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid)){
-        throw "Ownership cannot be verified for $Path"
-    }
-    # Writable data, append, child-delete, delete, change permissions or owner.
-    # AddFile/AddDirectory on an ancestor cannot redirect an already anchored
-    # child; delete-child permissions on the immediate parent can.
-    $mask=if($Anchor){0x100D0040}else{0x500D0156}
-    foreach($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
-        if($rule.AccessControlType -eq 'Allow' -and
-           -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and
-           ($rule.FileSystemRights -band $mask) -and $writers -notcontains $rule.IdentityReference.Value){
-            throw "Unexpected write/delete ACL on $Path"
-        }
-    }
-    if($CreatedSafeRoot -and (-not $acl.AreAccessRulesProtected -or -not @(
-        $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | Where-Object {
-            $_.IdentityReference.Value -eq $sid -and $_.AccessControlType -eq 'Allow' -and
-            ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Modify) -eq [Security.AccessControl.FileSystemRights]::Modify
-        }).Count)){throw 'Safe-mode root does not have its dedicated installer ACL.'}
-}
-
 function Get-ScienceRootSnapshot {
-    param([string]$Root,[switch]$CreatedSafeRoot)
+    param([string]$Root)
     $result=New-Object 'Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
     $pending=New-Object 'Collections.Generic.Stack[string]'
     $pending.Push($Root)
-    Assert-ScienceRootAcl ([IO.Path]::GetDirectoryName($Root)) -Anchor
     while($pending.Count){
         $item=$pending.Pop()
         if($result.Count -ge 300000){throw 'Removal inventory exceeded 300,000 entries.'}
         $anchor=[ScienceRootNative+Anchor]::new($item,$result)
         try {
             $sig=[ScienceRootNative]::Inspect($item,$true)
-            if($CreatedSafeRoot -and $item -ieq $Root){Assert-ScienceRootAcl $item -CreatedSafeRoot}
-            else{Assert-ScienceRootAcl $item}
             $result.Add($item,$sig)
             if([Convert]::ToUInt32(($sig -split ':')[2],16) -band 16){
                 foreach($child in [IO.Directory]::EnumerateFileSystemEntries($item)){$pending.Push($child)}
@@ -54,43 +23,6 @@ function Get-ScienceRootSnapshot {
         } finally {$anchor.Dispose()}
     }
     return ,$result
-}
-
-function Get-ScienceCondaScope {
-    param([string]$Prefix)
-    $paths=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    $metadata=Join-Path $Prefix 'conda-meta'
-    $history=Join-Path $metadata 'history'
-    if(-not [IO.File]::Exists($history)){throw "No Conda history in $Prefix"}
-    [void]$paths.Add($history);[void]$paths.Add((Join-Path $metadata 'pinned'))
-    $count=0
-    foreach($file in [IO.Directory]::EnumerateFiles($metadata,'*.json')){
-        $count++
-        if($count -gt 5000 -or ([IO.FileInfo]::new($file)).Length -gt 20MB){throw "Conda metadata limit exceeded: $file"}
-        $record=Read-ScienceJson $file
-        if([IO.Path]::GetFileName($file) -cne "$($record.name)-$($record.version)-$($record.build).json" -or $record.files -isnot [array]){
-            throw "Unidentified Conda metadata: $file"
-        }
-        [void]$paths.Add($file)
-        foreach($entry in $record.files){
-            if($entry -isnot [string] -or -not $entry -or $entry -match '(^[\\/]|:|(^|[\\/])\.\.?([\\/]|$)|[\x00-\x1f])'){
-                throw "Unsafe package entry in $file"
-            }
-            $full=[IO.Path]::GetFullPath((Join-Path $Prefix $entry))
-            if(-not (Test-PathWithin $full $Prefix)){throw "Package entry leaves $Prefix"}
-            [void]$paths.Add($full)
-        }
-    }
-    if(-not $count -and ([IO.FileInfo]::new($history)).Length){throw "History without package metadata: $Prefix"}
-    return ,$paths
-}
-
-function Add-ScienceScopedPath {
-    param($Allowed,[string]$Path,[string]$Root)
-    while($Path -ine $Root -and (Test-PathWithin $Path $Root)){
-        [void]$Allowed.Add($Path)
-        $Path=[IO.Path]::GetDirectoryName($Path)
-    }
 }
 
 function Assert-ScienceRootProcesses {
@@ -103,75 +35,6 @@ function Assert-ScienceRootProcesses {
             throw "A process still references the selected root (PID $($process.ProcessId))."
         }
     }
-}
-
-function Test-ScienceCacheEntry {
-    param([string]$Cache,[string]$Path,$Memo)
-    $relative=$Path.Substring($Cache.TrimEnd('\').Length).TrimStart('\')
-    if($relative -match '^(urls(?:\.txt)?|\.mamba_lock|cache(?:\\[a-fA-F0-9]{8,64}(?:\.state)?\.(?:json|solv|lock))?)$'){return $true}
-    if($relative -match '^[\w.+-]+-[\w.+-]+-[\w.+-]+\.(?:conda|tar\.bz2)$'){return $true}
-    $dir=($relative -split '\\')[0]
-    $package=Join-Path $Cache $dir
-    if(-not $Memo.ContainsKey($package)){
-        $index=Join-Path $package 'info\index.json'
-        if(-not [IO.File]::Exists($index)){return $false}
-        $item=Read-ScienceJson $index
-        if($dir -cne "$($item.name)-$($item.version)-$($item.build)"){return $false}
-        $manifest=Join-Path $package 'info\paths.json'
-        $files=Join-Path $package 'info\files'
-        if([IO.File]::Exists($manifest)){
-            $metadata=Read-ScienceJson $manifest
-            if($metadata.paths -isnot [array]){return $false}
-            $names=@($metadata.paths | ForEach-Object {$_._path})
-        }else{
-            Assert-ScienceRegularPath $files
-            $names=[IO.File]::ReadAllLines($files)
-        }
-        $known=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-        foreach($name in $names){
-            if($name -isnot [string] -or $name -match '(^[\\/]|:|(^|[\\/])\.\.?([\\/]|$)|[\x00-\x1f])'){throw "Unsafe cache manifest: $package"}
-            Add-ScienceScopedPath $known ([IO.Path]::GetFullPath((Join-Path $package $name))) $package
-        }
-        foreach($name in 'index.json','paths.json','repodata_record.json','files','about.json','hash_input.json','link.json','git','run_exports.json','has_prefix','no_link','no_softlink','test','recipe','licenses'){
-            [void]$known.Add((Join-Path $package "info\$name"))
-        }
-        [void]$known.Add((Join-Path $package 'info'))
-        $Memo[$package]=$known
-    }
-    if($Path -ieq $package -or $Memo[$package].Contains($Path)){return $true}
-    return $Path -match '\\info\\(?:test|recipe|licenses)\\'
-}
-
-function Test-ScienceTransactionEvidencePath {
-    param($Layout,[string]$Path,$Snapshot,$Memo)
-    if(-not (Test-PathWithin $Path $Layout.Tmp) -or $Path -ieq $Layout.Tmp){return $false}
-    $relative=$Path.Substring($Layout.Tmp.Length+1)
-    if($relative -match '^(repoquery-[a-f0-9]{32}\.txt|librsvg-hook-[a-f0-9]{32}\.original)$'){return $true}
-    if($relative -match '^science-solver-failure-[a-f0-9]{32}(?:\\(?:stdin|stdout|stderr)\.txt|\\[^\\]+\.json)?$'){return $true}
-    $parts=$relative -split '\\',2
-    if($parts[0] -cnotmatch '^science-transaction-[a-f0-9]{32}$'){return $false}
-    $tx=Join-Path $Layout.Tmp $parts[0]
-    if(-not $Memo.ContainsKey($tx)){
-        $lock=Join-Path $tx 'approved-lock.json'
-        if(-not $Snapshot.ContainsKey($lock)){return $false}
-        $approved=Read-ScienceJson $lock
-        if($approved.prefix -ine $Layout.Science){return $false}
-        $Memo[$tx]=$approved
-    }
-    if($parts.Count -eq 1){return $true}
-    $item=$parts[1]
-    if($item -match '^(approved-lock\.json|explicit-local\.txt|locked-environment\.yml|locked-preflight\.json|committed-plan\.json|commit-verification\.json|native-[a-z0-9-]+(?:\\(?:stdout\.txt|stderr\.txt|result\.json))?|download-prefix(?:\\conda-meta(?:\\history)?)?)$'){return $true}
-    if($item -match '^cache(?:\\|$)'){
-        $cache=Join-Path $tx 'cache'
-        if(-not $Memo.ContainsKey('stores:'+ $cache)){$Memo['stores:'+ $cache]=Get-ScienceCacheStores $cache $Snapshot}
-        return ($item -eq 'cache' -or (Test-ScienceCachePath $cache $Path $Memo $Memo['stores:'+ $cache]))
-    }
-    if($item -match '^channel(?:\\(?:win-64|noarch))?$'){return $true}
-    if($item -match '^channel\\(?:win-64|noarch)\\(?:repodata\.json|repodata\.json\.zst)$'){return $true}
-    foreach($record in @($Memo[$tx].approved.actions.LINK)){
-        if($record -and $item -ceq ('channel\'+$record.subdir+'\'+(Get-ScienceArtifactName $record))){return $true}
-    }
-    return $false
 }
 
 function Get-ScienceCleanupSetting {
@@ -189,7 +52,7 @@ function Get-ScienceCleanupConfigDirectories {
 function Assert-ScienceRemovalResources {
     param($Inventory,[string]$Root,[string]$Executable)
     foreach($entry in @($Inventory.External)){
-        if((Test-PathWithin $entry $Root) -or (Test-PathWithin $Root $entry)){
+        if($entry -ine $Root -and (Test-PathWithin $Root $entry)){
             throw "An external registration overlaps the selected root: $entry"
         }
     }
@@ -212,18 +75,30 @@ function Test-ScienceChannelOnlyConfig {
         @($lines|Select-Object -Skip 1|Where-Object {$_ -cnotmatch '^\s+-\s+[A-Za-z0-9_.-]+\s*$'}).Count -eq 0)
 }
 
+function Test-ScienceLocalRemovalVolume {
+    param([string]$Root)
+    $drive=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($Root))
+    return ($drive.DriveType -eq 'Fixed' -and $drive.DriveFormat -eq 'NTFS' -and $Root -ine $drive.RootDirectory.FullName)
+}
+
 function Get-ScienceTotalRemovalPlan {
     param($Row,$Inventory,[string]$ExpectedSha256)
     Initialize-ScienceRootNative
     $layout=$Row.Layout
     $root=$layout.Root
-    $drive=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($root))
-    if($drive.DriveType -ne 'Fixed' -or $drive.DriveFormat -ne 'NTFS' -or
-       $root -cne ([IO.Path]::GetFullPath($root)) -or $root -ieq $drive.RootDirectory.FullName -or
-       $root -ieq $HOME -or (Test-PathWithin $HOME $root) -or (Test-PathWithin $PSScriptRoot $root)){
-        throw 'Select a dedicated local NTFS directory separate from the user profile and running installer.'
+    $profiles=[IO.Path]::GetDirectoryName($HOME)
+    if(-not (Test-ScienceLocalRemovalVolume $root) -or
+       $root -cne ([IO.Path]::GetFullPath($root)) -or (Test-PathWithin $HOME $root) -or
+       (Test-PathWithin $PSScriptRoot $root) -or
+       ($root -ieq $layout.ParentRoot) -or ($profiles -and (Test-PathWithin $root $profiles) -and -not (Test-PathWithin $root $HOME))){
+        throw 'Select a dedicated local NTFS directory separate from system paths, profiles and the running installer.'
     }
-    if(@($Row.Unknown).Count -or @($Inventory.Problems).Count){throw 'Unknown or inaccessible inventory entries prevent proving the deletion scope.'}
+    foreach($protected in @($env:SystemRoot,$env:ProgramFiles,${env:ProgramFiles(x86)},$env:ProgramData,'C:\micromamba')){
+        if($protected -and ($root -ieq $protected -or ($protected -ine 'C:\micromamba' -and (Test-PathWithin $root $protected)))){
+            throw "Protected system or shared root: $protected"
+        }
+    }
+    if(@($Inventory.Problems).Count){throw 'Incomplete registry or root inventory prevents proving the deletion scope.'}
     if(-not $Row.VerifiedExecutable){throw 'The selected Micromamba executable does not match a trusted release hash.'}
     Assert-ScienceRemovalResources $Inventory $root $layout.Micromamba
     foreach($candidate in @($Inventory.Roots)){
@@ -244,29 +119,19 @@ function Get-ScienceTotalRemovalPlan {
     if($layout.State -and [IO.File]::Exists($layout.State)){
         Assert-ScienceRegularPath $layout.State
         $state=Read-ScienceJson $layout.State
-        $managed=$state.schema_version -eq 2 -and $state.user_sid -ceq (Get-ScienceSidInfo).Sid -and
+        Assert-ScienceLayoutStateIdentity $layout $state
+        $managed=$state.schema_version -eq 2 -and $state.user_sid -ceq $layout.Sid -and
                  $state.root -ieq $root -and $state.micromamba -ieq $layout.Micromamba -and
                  $state.root_existed_before -is [bool] -and -not $state.root_existed_before -and
                  $state.micromamba_existed_before -is [bool] -and -not $state.micromamba_existed_before
-        if(-not $managed){throw 'This installer state does not prove that the installer created the root and executable.'}
-        if($Row.Environments -contains 'science'){Assert-ScienceOwnedPrefix $layout $state}
-    } elseif(-not (Test-PathWithin $layout.Micromamba $root) -or -not $Row.Environments.Count){
-        throw 'User-managed root needs a trusted executable within the root and independently recognized environment metadata.'
     }
-    $external=New-Object 'Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+    if(-not ($managed -or $Row.Environments.Count -or [IO.Directory]::Exists($layout.Pkgs))){
+        throw 'The executable is recognized, but this directory has no Micromamba root layout.'
+    }
     $registry=$Inventory.Registry
-    $removeRegistrations=@()
-    foreach($entry in @($registry.Paths)){
-        if(Test-PathWithin $entry $root){
-            $known=@($Row.Environments|ForEach-Object {if($_ -eq 'base'){$root}else{Join-Path $layout.Envs $_}})
-            if($entry -ine $root -and $known -notcontains $entry){throw "Unknown registered prefix is inside the root: $entry"}
-            $removeRegistrations+=,$entry
-        }
-    }
+    $removeRegistrations=@($registry.Paths | Where-Object {Test-PathWithin $_ $root})
     if($removeRegistrations.Count){
-        Assert-ScienceRootAcl ([IO.Path]::GetDirectoryName($registry.Path)) -Anchor
-        Assert-ScienceRootAcl $registry.Path
-        [void][ScienceRootNative]::Inspect($registry.Path,$true)
+        Assert-ScienceRegularPath $registry.Path
     }
     $integration=@{}
     foreach($scope in 'Process','User','Machine'){
@@ -287,84 +152,29 @@ function Get-ScienceTotalRemovalPlan {
             $path=Join-Path $cfg $name
             if(-not (Test-Path -LiteralPath $path)){continue}
             $supportedConfig=@($Inventory.Roots | Where-Object {$_.Mode -in 'Home','Safe' -and $_.Layout.Config -ieq $path})
-            if(($supportedConfig.Count -eq 1 -or ($managed -and $path -ieq $layout.Config)) -and [IO.File]::Exists($path)){
+            if(($supportedConfig.Count -eq 1 -or $path -ieq $layout.Config) -and [IO.File]::Exists($path)){
                 Assert-ScienceRegularPath $path
                 if([IO.File]::ReadAllText($path).Trim() -ceq 'use_sharded_repodata: false'){continue}
             }
             if([IO.File]::Exists($path) -and (Test-ScienceChannelOnlyConfig $path)){
-                if($cfg -ieq $root){throw "The selected root contains a user configuration: $path"}
                 continue
             }
             throw "A custom configuration may share resources: $path"
         }
     }
-    foreach($profilePath in @($PROFILE.CurrentUserAllHosts,$PROFILE.CurrentUserCurrentHost)|Select-Object -Unique){
-        if($profilePath -and [IO.File]::Exists($profilePath)){
-            Assert-ScienceRegularPath $profilePath
-            if([IO.File]::ReadAllText($profilePath).IndexOf($root,[StringComparison]::OrdinalIgnoreCase) -ge 0){
-                throw "Custom shell integration references this root; resolve it before removal: $profilePath"
-            }
-        }
-    }
     Assert-ScienceRootProcesses $root $layout.Micromamba
-    $snapshot=Get-ScienceRootSnapshot $root -CreatedSafeRoot:($managed -and $layout.Mode -eq 'Safe' -and $layout.Sid -ceq (Get-ScienceSidInfo).Sid)
-    if($managed -and $state.root_file_identity -and $state.root_file_identity -cne $snapshot[$root].Substring(0,26)){
+    $snapshot=Get-ScienceRootSnapshot $root
+    if($state -and $state.root_file_identity -and $state.root_file_identity -cne $snapshot[$root].Substring(0,26)){
         throw 'Root directory identity disagrees with the installer state.'
     }
     Assert-ScienceRegularPath $layout.Micromamba
     if((Get-FileHash -LiteralPath $layout.Micromamba -Algorithm SHA256 -ErrorAction Stop).Hash -ine $ExpectedSha256){throw 'Micromamba changed during planning.'}
-    $allowed=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach($path in @($layout.Micromamba,$layout.Envs,$layout.Pkgs)){Add-ScienceScopedPath $allowed $path $root}
-    $payload=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach($name in $Row.Environments){
-        if($name -ne 'base' -and ($name -ne [IO.Path]::GetFileName($name) -or $name -in '.','..')){throw 'Invalid environment inventory name.'}
-        $prefix=if($name -eq 'base'){$root}else{Join-Path $layout.Envs $name}
-        foreach($path in (Get-ScienceCondaScope $prefix)){
-            [void]$payload.Add($path)
-            Add-ScienceScopedPath $allowed $path $root
-        }
-    }
-    if($managed){
-        foreach($name in '.science-update.lock','.scientific-python-install-state.json','.mambarc','start-spyder.ps1','science-runtime.json','science-packages.json','science-other-environments.json','SHA256SUMS.txt','envs/science/.science-environment-owner','tmp'){
-            Add-ScienceScopedPath $allowed (Join-Path $root $name) $root
-        }
-        $manifest=Join-Path $root 'SHA256SUMS.txt'
-        if([IO.File]::Exists($manifest) -and ([IO.FileInfo]::new($manifest)).Length -lt 256KB){
-            foreach($line in [IO.File]::ReadAllLines($manifest)){
-                if($line -cnotmatch '^([0-9a-f]{64})  ([A-Za-z0-9_. /-]+)$' -or $Matches[2] -match '(^/|(^|/)\.\.(/|$))'){throw 'Invalid installed support manifest.'}
-                $hash=$Matches[1];$path=Join-Path $root $Matches[2]
-                if([IO.File]::Exists($path) -and $snapshot.ContainsKey($path.Replace('/','\')) -and
-                   (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash -ieq $hash){Add-ScienceScopedPath $allowed $path.Replace('/','\') $root}
-            }
-        }
-        $launch=Get-ScientificPythonSpyderLauncherPaths $layout
-        if([IO.File]::Exists($launch.Script)){
-            Assert-ScienceRegularPath $launch.Script
-            $installedTemplate=Join-Path $root 'spyder-launcher.ps1'
-            $template=if([IO.File]::Exists($installedTemplate) -and $allowed.Contains($installedTemplate)){$installedTemplate}
-                else{Join-Path $PSScriptRoot 'spyder-launcher.ps1'}
-            if((Get-ScienceFileSha256 $launch.Script) -cne (Get-ScienceFileSha256 $template)){
-                throw 'Unidentified Spyder launcher script.'
-            }
-        }
-        if([IO.File]::Exists($launch.Command)){
-            Assert-ScienceRegularPath $launch.Command
-            if([IO.File]::ReadAllText($launch.Command).IndexOf($launch.Script,[StringComparison]::OrdinalIgnoreCase) -lt 0){throw 'Unidentified Spyder command launcher.'}
-            if(Test-PathWithin $launch.Command $root){Add-ScienceScopedPath $allowed $launch.Command $root}
-            else{Assert-ScienceRootAcl $launch.Command; $external.Add($launch.Command,[ScienceRootNative]::Inspect($launch.Command,$true))}
-        }
-        if(Test-ScientificPythonSpyderShortcut $launch.Shortcut $launch.Script){
-            Assert-ScienceRegularPath $launch.Shortcut
-            Assert-ScienceRootAcl $launch.Shortcut
-            $external.Add($launch.Shortcut,[ScienceRootNative]::Inspect($launch.Shortcut,$true))
-        }
-        if($state.bin_path_existed_before -is [bool] -and -not $state.bin_path_existed_before){
-            $pathValue=Get-ScienceCleanupSetting 'Path' 'User'
-            if($pathValue){
-                $pathParts=$pathValue -split ';'
-                $nextPath=($pathParts | Where-Object {$_ -ine $layout.Bin}) -join ';'
-                if($nextPath -cne $pathValue){$integration['User/Path']=@($pathValue,$nextPath)}
-            }
+    if($managed -and (Test-PathWithin $layout.Bin $root) -and
+       $state.bin_path_existed_before -is [bool] -and -not $state.bin_path_existed_before){
+        $pathValue=Get-ScienceCleanupSetting 'Path' 'User'
+        if($pathValue){
+            $nextPath=(($pathValue -split ';') | Where-Object {$_ -ine $layout.Bin}) -join ';'
+            if($nextPath -cne $pathValue){$integration['User/Path']=@($pathValue,$nextPath)}
         }
     }
     foreach($scope in 'User','Process'){
@@ -377,54 +187,16 @@ function Get-ScienceTotalRemovalPlan {
             }
         }
     }
-    if(-not (Test-PathWithin $layout.Micromamba $root)){
-        Assert-ScienceRootAcl $layout.Micromamba
-        $external.Add($layout.Micromamba,[ScienceRootNative]::Inspect($layout.Micromamba,$true))
-    }
-    $memo=@{}
-    $cacheStores=Get-ScienceCacheStores $layout.Pkgs $snapshot
-    foreach($path in $snapshot.Keys){
-        if($path -ieq $root -or $allowed.Contains($path)){continue}
-        if((Split-Path -Leaf $path) -match '^(.+)\.cpython-\d+(?:\.opt-\d+)?\.pyc$' -and (Split-Path -Leaf (Split-Path -Parent $path)) -ceq '__pycache__' -and
-           $payload.Contains((Join-Path (Split-Path -Parent (Split-Path -Parent $path)) ($Matches[1]+'.py')))){continue}
-        if(([Convert]::ToUInt32(($snapshot[$path] -split ':')[2],16) -band 16) -and (Split-Path -Leaf $path) -ceq '__pycache__' -and
-           $allowed.Contains((Split-Path -Parent $path)) -and @([IO.Directory]::EnumerateDirectories($path)).Count -eq 0){continue}
-        if((Test-PathWithin $path $layout.Pkgs) -and (Test-ScienceCachePath $layout.Pkgs $path $memo $cacheStores)){continue}
-        if($managed -and (Test-ScienceTransactionEvidencePath $layout $path $snapshot $memo)){continue}
-        throw "Unidentified content will not be deleted: $path"
-    }
-    return [pscustomobject]@{Root=$root;Files=$snapshot;External=$external;Environments=@($Row.Environments|Sort-Object);
+    return [pscustomobject]@{Root=$root;Files=$snapshot;Environments=@($Row.Environments|Sort-Object);
         Integration=$integration;Registry=$registry;RemoveRegistrations=$removeRegistrations}
-}
-
-function Get-ScienceCacheStores {
-    param([string]$Cache,$Snapshot)
-    $stores=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    foreach($candidate in $Snapshot.Keys){
-        if(-not (Test-PathWithin $candidate $Cache) -or $candidate -ieq $Cache -or
-           $candidate -notmatch '\\(?:https|http|file)\\.+\\[^\\]+\\info\\index\.json$'){continue}
-        $package=Split-Path -Parent (Split-Path -Parent $candidate)
-        $store=Split-Path -Parent $package
-        if($store -ine $Cache){[void]$stores.Add($store)}
-    }
-    return ,$stores
-}
-
-function Test-ScienceCachePath {
-    param([string]$Cache,[string]$Path,$Memo,$Stores)
-    foreach($store in $Stores){
-        if($Path -ieq $store -or (Test-PathWithin $store $Path)){return $true}
-        if(Test-PathWithin $Path $store){return Test-ScienceCacheEntry $store $Path $Memo}
-    }
-    return Test-ScienceCacheEntry $Cache $Path $Memo
 }
 
 function Test-ScienceRemovalConfirmations {
     param([string]$Root,[bool]$Default,[scriptblock]$Reader={param($Prompt) Read-Host $Prompt})
     if(-not (Test-ScienceInteractiveConfiguration)){throw 'Whole-root removal requires an interactive console.'}
-    if(-not $Default -and (& $Reader "Type the displayed root path exactly: $Root") -cne $Root){return $false}
+    if(-not $Default -and (& $Reader "Type the displayed directory path exactly: $Root") -cne $Root){return $false}
     $phrase='Yes, I do understand.'
-    if((& $Reader "Permanently remove this root and all listed environments? Type: $phrase") -cne $phrase){return $false}
+    if((& $Reader "First confirmation for ${Root}. Type: $phrase") -cne $phrase){return $false}
     return ((& $Reader "Final confirmation for $Root. Type again: $phrase") -ceq $phrase)
 }
 
@@ -443,7 +215,7 @@ function Select-ScienceTotalRoot {
         if($item.Unknown.Count){Write-Host ('    Unknown: '+($item.Unknown -join '; '))}
     }
     foreach($path in $Inventory.External){Write-Host "Preserve external registered environment: $path"}
-    $answer=([string](& $Reader "Select Micromamba root [$default]; 0 cancels")).Trim()
+    $answer=([string](& $Reader "Select Micromamba directory [$default]; 0 cancels")).Trim()
     if(-not $answer){$answer=[string]$default}
     if($answer -eq '0'){return $null}
     if($answer -notmatch '^[1-9]\d{0,2}$' -or [int]$answer -gt $rows.Count){throw 'Invalid root selection.'}
@@ -454,7 +226,6 @@ function Get-ScienceRemovalPlanDigest {
     param($Plan)
     $rows=@('ROOT '+$Plan.Root)+@($Plan.Environments | ForEach-Object {'ENV '+$_})+
         @($Plan.Files.Keys | Sort-Object | ForEach-Object {"FILE $_ $($Plan.Files[$_])"})+
-        @($Plan.External.Keys | Sort-Object | ForEach-Object {"EXTERNAL $_ $($Plan.External[$_])"})+
         @($Plan.Integration.Keys | Sort-Object | ForEach-Object {"SETTING $_ "+($Plan.Integration[$_] -join [char]0)})+
         @($Plan.Registry.Digest)+@($Plan.RemoveRegistrations)
     return Get-ScienceTextDigest ($rows -join "`n")
@@ -485,11 +256,6 @@ function Invoke-ScienceTotalRemoval {
         $failed=$plan.Root
         [ScienceRootNative]::Remove($plan.Root,$plan.Files[$plan.Root],$plan.Files)
         $seen.Add($plan.Root)
-        foreach($path in $plan.External.Keys){
-            $failed=$path
-            [ScienceRootNative]::Remove($path,$plan.External[$path],$plan.Files)
-            $seen.Add($path)
-        }
         if($plan.RemoveRegistrations.Count){
             $failed=$plan.Registry.Path
             $bytes=[IO.File]::ReadAllBytes($failed)

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([string]$TempRoot=[IO.Path]::GetTempPath(),[string]$Micromamba,[string]$PackageArchive)
 $ErrorActionPreference='Stop'
 $base=Join-Path (Split-Path -Parent $PSScriptRoot) 'windows'
@@ -37,16 +37,25 @@ function New-FixtureRoot([string]$Name){
         Layout=[pscustomobject]@{Root=$root;Envs=(Join-Path $root 'envs');Science=(Join-Path $root 'envs/science');
             Pkgs=(Join-Path $root 'pkgs');Tmp=(Join-Path $root 'tmp');Micromamba=$exe}}
 }
-# Policy fixtures isolate machine-wide settings and CIM; the NTFS identity,
-# junction, open-file, enumeration and deletion operations are real.
-function Assert-ScienceRootProcesses {if($script:Busy){throw 'active process fixture'}}
-function Assert-ScienceRootAcl {
-    param([string]$Path,[switch]$Anchor)
-    $acl=Get-Acl -LiteralPath $Path
-    if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne (Get-ScienceSidInfo).Sid){
-        throw 'foreign ACL fixture'
+# Windows exercises native handles, junctions and effective deletion rights.
+# Other hosts simulate those boundaries and still test the production planner.
+$nativeWindows=[Environment]::OSVersion.Platform -eq 'Win32NT'
+if(-not $nativeWindows){
+    function Test-ScienceLocalRemovalVolume {param($Root);return $Root.StartsWith($homeFixture+[IO.Path]::DirectorySeparatorChar)}
+    function Test-PathWithin {
+        param([string]$Path,[string]$Base)
+        return ($Path -and $Base -and ($Path -eq $Base -or $Path.StartsWith($Base.TrimEnd('/')+'/')))
+    }
+    function Get-ScienceRootSnapshot {
+        param([string]$Root)
+        $snapshot=New-Object 'Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach($path in @((Get-Item -LiteralPath $Root))+@(Get-ChildItem -LiteralPath $Root -Recurse -Force)){
+            $snapshot.Add($path.FullName,"fixture:$($path.LastWriteTimeUtc.Ticks)")
+        }
+        return ,$snapshot
     }
 }
+function Assert-ScienceRootProcesses {if($script:Busy){throw 'active process fixture'}}
 function Test-ScienceInteractiveConfiguration {return $script:Interactive}
 function Get-ScienceCleanupSetting {
     param([string]$Name,[string]$Scope)
@@ -97,13 +106,34 @@ try{
     $caseCount++
     $extra=Join-Path $selected.Layout.Science 'user.ipynb'
     Write-Fixture $extra 'not package-owned'
-    Expect-Block $make 'Unidentified content'
-    [IO.File]::Delete($extra)
+    Write-Fixture (Join-Path $selected.Root '.inventory-fixture-marker') 'root notes'
+    Write-Fixture (Join-Path $selected.Layout.Envs 'scratch/.message.txt') 'test data'
+    $selected.Unknown=@('scratch')
+    if($nativeWindows){
+        $acl=Get-Acl -LiteralPath $extra
+        $users=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+        $grant=[Security.AccessControl.FileSystemAccessRule]::new($users,'Write','Allow')
+        $acl.AddAccessRule($grant)
+        Set-Acl -LiteralPath $extra -AclObject $acl
+    }
+    $plan=& $make
+    Assert-True ($plan.Files.ContainsKey($extra)) 'User payload or additional ACL prevented whole-root planning.'
     $caseCount++
     $selected.VerifiedExecutable=$false
     Expect-Block $make 'trusted release hash'
     $selected.VerifiedExecutable=$true
     $caseCount++
+    if(-not $nativeWindows){
+        $changed=Join-Path $selected.Root 'new-after-approval.txt'
+        Write-Fixture $changed 'late'
+        $report=Invoke-ScienceTotalRemoval $plan $make
+        Assert-True ($report.Status -eq 'BLOCKED' -and [IO.File]::Exists($extra) -and
+            [IO.File]::Exists($changed)) 'Changed plan reached the native delete boundary.'
+        $caseCount++
+        Write-Host "PASS simulated Windows whole-root fixture groups: $caseCount"
+        Write-Host 'SKIP native NTFS ACL, junction, open handles and deletion require Windows.'
+        return
+    }
     $junction=Join-Path $selected.Root 'redirected'
     try{$null=New-Item -ItemType Junction -Path $junction -Target $other.Root -ErrorAction Stop}
     catch{
@@ -196,7 +226,7 @@ try{
 }finally{
     foreach($name in $oldVars.Keys){[Environment]::SetEnvironmentVariable($name,$oldVars[$name],'Process')}
     $resolved=[IO.Path]::GetFullPath($homeFixture)
-    if($resolved.StartsWith(([IO.Path]::GetFullPath($TempRoot).TrimEnd('\')+'\science-total-fixture-'),[StringComparison]::OrdinalIgnoreCase)){
+    if($resolved.StartsWith(([IO.Path]::GetFullPath($TempRoot).TrimEnd('\','/')+[IO.Path]::DirectorySeparatorChar+'science-total-fixture-'),[StringComparison]::OrdinalIgnoreCase)){
         Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

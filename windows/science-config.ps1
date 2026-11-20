@@ -170,32 +170,55 @@ function Set-ScienceConfigurationOrigin {
     }
 }
 function Initialize-ScienceConfiguration {
-    param([string]$Path=(Get-ScienceConfigurationPath),[string]$Root,[string]$LegacyPath)
+    param([string]$Path=(Get-ScienceConfigurationPath),[string]$Root,[string]$LegacyPath,[scriptblock]$UseExistingReviewer)
     if ($LegacyPath -and -not (Test-Path -LiteralPath $LegacyPath -PathType Leaf) -and -not (Test-Path -LiteralPath $Path -PathType Leaf)) {throw 'Explicit legacy configuration is missing; migration stopped.'}
     if ($Root) {$null=Get-ScienceConfigurationOrigins $Path $Root}
+    $existing=$Root -and (Test-Path -LiteralPath (Join-Path $Root 'envs/science'))
     $candidates=@($Path)
     if ($LegacyPath) {$candidates+=,$LegacyPath}
-    $candidates+=,(Join-Path $PSScriptRoot 'science-release.json')
-    if ($Root) {$candidates+=,(Join-Path $Root 'science-release.json')}
+    # Recover an old copy only for an existing Science prefix.
+    if ($existing -or -not $Root) {$candidates+=,(Join-Path $PSScriptRoot 'science-release.json')}
+    if ($existing) {$candidates+=,(Join-Path $Root 'science-release.json')}
     $source=$null
     foreach ($candidate in $candidates) {if (Test-Path -LiteralPath $candidate) {$source=$candidate;break}}
     if (-not $source) {
-        if ($Root -and (Test-Path -LiteralPath (Join-Path $Root 'envs/science'))) {throw 'Existing Science environment has no recoverable original configuration. Restore science-release.json and its matching original science-release.ps1; migration stopped. No environment changes were made.'}
+        if ($existing) {throw 'Existing Science environment has no recoverable original configuration. Restore science-release.json and its matching original science-release.ps1; migration stopped. No environment changes were made.'}
         $value=Get-ScienceDefaultConfiguration
     } else {
         $old=Read-ScienceJson $source
         $legacySource=Join-Path (Split-Path -Parent $source) 'science-release.ps1'
         $value=Convert-ScienceLegacyConfiguration $old $legacySource
         if ($source -eq $Path -and @($old.PSObject.Properties.Name) -ccontains 'SchemaVersion') {
-            if ($Root -and (Test-Path -LiteralPath (Join-Path $Root 'envs/science'))) {
+            if ($existing) {
                 $origin=Get-ScienceConfigurationOrigins $Path $Root
                 if ($origin.Value.Roots -cnotcontains $origin.Key) {
                     $previous=$null
                     foreach($candidate in @($candidates | Select-Object -Skip 1)) {if(Test-Path -LiteralPath $candidate){$previous=$candidate;break}}
-                    if (-not $previous) {throw 'Existing Science environment has no matching original configuration for this active file. Restore its original science-release.json and matching science-release.ps1; migration stopped. No configuration or environment changes were made.'}
-                    $prior=Convert-ScienceLegacyConfiguration (Read-ScienceJson $previous) (Join-Path (Split-Path -Parent $previous) 'science-release.ps1')
-                    $same=($prior.SchemaVersion -eq $value.SchemaVersion) -and ((@($prior.Channels) -join [char]0) -ceq (@($value.Channels) -join [char]0)) -and ((@($prior.ScientificPackages) -join [char]0) -ceq (@($value.ScientificPackages) -join [char]0))
-                    if (-not $same) {throw 'Existing installation configuration differs from the unassociated active file. Migration stopped; no user preferences were overwritten.'}
+                    $same=$false
+                    if($previous){
+                        try{
+                            $prior=Convert-ScienceLegacyConfiguration (Read-ScienceJson $previous) (Join-Path (Split-Path -Parent $previous) 'science-release.ps1')
+                            $same=($prior.SchemaVersion -eq $value.SchemaVersion) -and
+                                ((@($prior.Channels) -join [char]0) -ceq (@($value.Channels) -join [char]0)) -and
+                                ((@($prior.ScientificPackages) -join [char]0) -ceq (@($value.ScientificPackages) -join [char]0))
+                        }catch{
+                            $same=$false
+                        }
+                    }
+                    if(-not $same){
+                        $original=[Convert]::ToBase64String([IO.File]::ReadAllBytes($Path))
+                        $validate=Convert-ScienceLegacyConfiguration (Read-ScienceJson $Path)
+                        if(($validate | ConvertTo-Json -Depth 32 -Compress) -cne ($value | ConvertTo-Json -Depth 32 -Compress)){
+                            throw 'Configuration changed during review. Retry with the current file.'
+                        }
+                        $prefix=Join-Path $Root 'envs/science'
+                        if(-not $UseExistingReviewer -or ([string](& $UseExistingReviewer "Use the validated package requests from $Path for ${prefix}? [y/N]")).Trim() -notmatch '^(?i:y|yes)$'){
+                            throw 'The existing Science environment has no matching original configuration. Select the validated active file explicitly or restore the original configuration.'
+                        }
+                        if([Convert]::ToBase64String([IO.File]::ReadAllBytes($Path)) -cne $original){
+                            throw 'Configuration changed during review. Retry with the current file.'
+                        }
+                    }
                 }
             }
             Set-ScienceConfigurationOrigin $Path $Root
@@ -246,7 +269,7 @@ function Show-ScienceNewRootConfiguration {
     param($Layout,[string]$Path=(Get-ScienceConfigurationPath))
     if(Test-Path -LiteralPath $Layout.Science){return}
     if(-not (Test-Path -LiteralPath $Path)){
-        Write-Host 'The new root will start with release defaults if no legacy configuration is found. Release defaults do not request PyTorch.'
+        Write-Host 'No active configuration. Starting with the release defaults.'
         return
     }
     Assert-ScienceRegularPath $Path
@@ -406,6 +429,7 @@ function Set-SciencePyTorchRequest {
 }
 
 function Select-ScienceOptionalPackages {
+    param([switch]$Fresh)
     if(-not (Test-ScienceInteractiveConfiguration)){throw 'Optional package selection requires an interactive console.'}
     $path=Get-ScienceConfigurationPath
     Assert-ScienceRegularPath $path
@@ -415,35 +439,46 @@ function Select-ScienceOptionalPackages {
         throw 'Configuration changed while reading; start again.'
     }
     $backend=Get-SciencePyTorchBackend $value.ScientificPackages
-    $cudaAvailable=Test-ScienceNvidiaDevice
-    Write-Host 'Optional packages'
+    if($Fresh){Write-Host 'PyTorch for this fresh Science installation'}else{Write-Host 'Optional packages'}
     Write-Host ('Configured PyTorch backend: '+$backend.ToUpperInvariant())
-    Write-Host ('NVIDIA CUDA device: '+$(if($cudaAvailable){'detected; compatibility will be checked by the solver'}else{'unavailable'}))
+    if($Fresh){
+        Write-Host 'The selection is saved in the active package configuration.'
+        Write-Host '0  No PyTorch (default)'
+    }
     Write-Host '1  PyTorch CPU'
     Write-Host '2  PyTorch NVIDIA CUDA'
-    Write-Host 'R  Remove the PyTorch request'
+    if(-not $Fresh){Write-Host 'R  Remove the PyTorch request'}
     Write-Host 'Q  Back'
+    $prompt=if($Fresh){'PyTorch [0]'}else{'Optional packages'}
+    $choices=if($Fresh){'0','1','2'}else{'1','2','r'}
     while($true) {
-        $choice=(Read-Host 'Optional packages').Trim().ToLowerInvariant()
-        if(-not $choice -or $choice -eq 'q'){return $false}
-        if($choice -eq '2' -and -not $cudaAvailable){
-            Write-Host 'CUDA requires a working NVIDIA driver and a detectable GPU.'
+        $choice=([string](Read-Host $prompt)).Trim().ToLowerInvariant()
+        if(-not $choice){$choice=if($Fresh){'0'}else{'q'}}
+        if($choice -eq 'q'){return $false}
+        if($choice -notin $choices){
+            Write-Host 'Unknown selection.'
             continue
         }
-        if($choice -in @('1','2','r')){break}
-        Write-Host 'Unknown selection.'
+        if($choice -eq '2'){
+            if(-not (Test-ScienceNvidiaDevice)){
+                Write-Host 'CUDA requires a working NVIDIA driver and a detectable GPU.'
+                continue
+            }
+            Write-Host 'NVIDIA CUDA device detected. The solver will check compatibility.'
+        }
+        break
     }
     if($choice -eq 'r' -and (Read-Host 'Remove the configuration request only? [y/N]').Trim() -notmatch '^(?i:y|yes)$'){
         return $false
     }
-    $selected=@{'1'='cpu';'2'='cuda';'r'='remove'}[$choice]
+    $selected=@{'0'='remove';'1'='cpu';'2'='cuda';'r'='remove'}[$choice]
     $backup=Set-SciencePyTorchRequest -Choice $selected -Path $path -ExpectedBytes $original
     if($backup){Write-Host ('Previous package configuration saved to '+$backup)}
-    if($selected -eq 'remove'){
+    if($choice -eq 'r'){
         Write-Host 'PyTorch is no longer requested. Installed packages were preserved.'
         return $false
     }
-    Write-Host ('PyTorch '+$selected.ToUpperInvariant()+' selected.')
-    Write-Host 'Installation/update will follow now; no second menu selection is needed. Proposed package changes require separate approval.'
+    if($choice -eq '0'){Write-Host 'No PyTorch selected.'}
+    else{Write-Host ('PyTorch '+$selected.ToUpperInvariant()+' selected.')}
     return $true
 }

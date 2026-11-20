@@ -155,8 +155,9 @@ class TestCandidate(unittest.TestCase):
         registry.write_text(str(self.prefix)+'\n'+str(additional.parent)+'\n'+str(other)+'\n')
         inventory = {'details': {str(other): {'unknown': []}}, 'unknown': [], 'external_cache_settings': []}
         with patch.object(m, 'release', return_value={'MicromambaExeSha256': digest}), patch.object(m, 'using_science', return_value=False), patch.object(m.safety, 'config_sources', return_value=[]), patch.dict(os.environ, {}, clear=True):
-            with m.locked(self.root):
-                m.seal_dedicated_root(self.root)
+            m.write_json(self.root/m.DEDICATED_ROOT_RECEIPT, dict(managed_by=m.safety.PRODUCT, scope='dedicated-root',
+                         root=str(self.root), identity=[identity.st_dev, identity.st_ino], tree_fingerprint='historical'))
+            (self.root/'.inventory-fixture-marker').write_text('managed root with local data')
             plan = m.total_removal_plan(self.root, self.home, inventory)
             self.assertEqual(set(plan['tree']['prefixes']), {self.prefix, additional.parent})
             self.assertEqual(m.apply_total_removal(self.root, self.home, plan, lambda: inventory)[0], str(self.root))
@@ -171,22 +172,111 @@ class TestCandidate(unittest.TestCase):
             delete.assert_not_called()
 
     @unittest.skipUnless(os.name == 'posix', 'POSIX mount and descriptor checks required')
-    def test_user_managed_root_lock_and_unknown_payload(self):
+    def test_user_managed_root_allows_arbitrary_payload_and_group_writes(self):
         binary = self.root/'bin/micromamba'; binary.parent.mkdir(); binary.write_text('verified fixture executable')
         digest = hashlib.sha256(binary.read_bytes()).hexdigest()
         (self.meta/'history').touch()
         external = self.home/'external'; external.mkdir()
         extra = self.prefix/'my-work.ipynb'; extra.touch()
+        self.root.chmod(0o775); self.prefix.chmod(0o777)
+        (self.root/'.message.txt').write_text('local data')
+        displaced = self.prefix/'nested-venv'; displaced.mkdir()
+        (displaced/'pyvenv.cfg').touch()
+        launcher = self.home/'launcher'; launcher.write_text('outside root')
+        (self.home/'.bashrc').write_text(str(self.root))
         inventory = {'details': {}, 'unknown': [], 'external_cache_settings': []}
         with patch.object(m, 'release', return_value={'MicromambaExeSha256': digest}), patch.object(m, 'using_science', return_value=False), patch.object(m.safety, 'config_sources', return_value=[]), patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(m.InstallError, 'Unidentified environment entry'):
-                m.total_removal_plan(self.root, self.home, inventory)
-            extra.unlink()
+            with self.assertRaisesRegex(m.safety.SafetyError, 'Nested Python/Conda'):
+                m.safety.tree_plan(self.prefix)
             plan = m.total_removal_plan(self.root, self.home, inventory)
             self.assertFalse((self.root/'.science-installer.lock').exists())
             m.apply_total_removal(self.root, self.home, plan, lambda: inventory)
         self.assertFalse(self.root.exists())
         self.assertTrue(external.is_dir())
+        self.assertEqual(launcher.read_text(), 'outside root')
+        self.assertEqual((self.home/'.bashrc').read_text(), str(self.root))
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX mount and descriptor checks required')
+    def test_whole_root_rejects_escapes_mounts_and_missing_delete_rights(self):
+        outsider = self.home/'outside'
+        outsider.mkdir()
+        keep = outsider/'keep'; keep.write_text('untouched')
+        link = self.root/'escape'
+        link.symlink_to(outsider, target_is_directory=True)
+        with self.assertRaisesRegex(m.safety.SafetyError, 'Link leaves'):
+            m.safety.tree_plan(self.root, dedicated=True)
+        link.unlink()
+        with patch.object(m.safety, 'mount_points', return_value=[self.prefix]):
+            with self.assertRaisesRegex(m.safety.SafetyError, 'Mounted directory'):
+                m.safety.tree_plan(self.root, dedicated=True)
+        actual_access = os.access
+        with patch.object(m.safety.os, 'access', side_effect=lambda path, mode, **kw:
+                          path != self.prefix and actual_access(path, mode, **kw)):
+            with self.assertRaisesRegex(m.safety.SafetyError, 'No write/search permission'):
+                m.safety.tree_plan(self.root, dedicated=True)
+        self.assertEqual(keep.read_text(), 'untouched')
+
+    def test_legacy_adoption_without_receipts_requires_approval_and_rechecks_metadata(self):
+        launcher = self.write_v3()
+        launcher.write_text('modified legacy launcher')
+        self.state.unlink()
+        binary = self.root/'bin/micromamba'
+        binary.write_text('trusted fixture'); binary.chmod(0o700)
+        python = self.prefix/'bin/python'; python.parent.mkdir(); python.touch(mode=0o700)
+        keep = self.prefix/'personal.txt'; keep.write_text('keep')
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        with patch.object(m, 'release', return_value={'MicromambaExeSha256': digest}), \
+             patch.object(sys.stdin, 'isatty', return_value=True), \
+             patch.object(m, 'using_science', return_value=False), contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(sys.stdout, 'isatty', return_value=True):
+                with self.assertRaises(installer.PreparationPending):
+                    installer.review_migration(self.root, self.home, binary, Mock(return_value='no'))
+                evidence = installer.review_migration(self.root, self.home, binary, Mock(return_value='yes'))
+            self.assertEqual(evidence['format'], 'approved-existing-science')
+            self.assertFalse(self.receipt.exists())
+            history = self.meta/'history'; original = history.read_bytes()
+            history.write_bytes(original + b'changed\n')
+            with self.assertRaisesRegex(m.InstallError, 'changed after review'):
+                m.write_migration_receipt(self.root, self.home, binary, evidence)
+            history.write_bytes(original)
+            m.write_migration_receipt(self.root, self.home, binary, evidence)
+            self.assertTrue(m.owned_science(self.root))
+            with self.assertRaisesRegex(m.InstallError, 'update only'):
+                m.removal_ownership(self.root)
+        self.assertEqual(keep.read_text(), 'keep')
+        self.assertFalse((self.root/'.science-root-owner.json').exists())
+
+    def test_adopted_science_can_complete_an_in_place_noop(self):
+        binary = self.root/'bin/micromamba'
+        binary.parent.mkdir()
+        binary.write_text('never execute'); binary.chmod(0o700)
+        python = self.prefix/'bin/python'; python.parent.mkdir(); python.touch(mode=0o700)
+        (self.meta/'history').write_text('+python-3.14.10-fixture\n')
+        config = m.release()
+        config['MicromambaExeSha256'] = hashlib.sha256(binary.read_bytes()).hexdigest()
+        variants = {'python': ('3.14.10', 'fixture'), 'spyder': (config['Spyder'], 'fixture'),
+                    'opencv': (config['OpenCV'], 'qt6_fixture'), 'ffmpeg': (config['FFmpeg'], 'gpl_fixture'),
+                    'apache-arrow-proc': ('20.0.0', 'cpu'), 'python_abi': ('3.14.0', '0_cp314')}
+        for request in config['ScientificPackages']:
+            name = m.spec_name(request)
+            version, build = variants.get(name, ('1.0.0', 'fixture'))
+            row = dict(name=name, version=version, build=build, subdir='linux-64', sha256='a'*64)
+            (self.meta/f'{name}-{version}-{build}.json').write_text(json.dumps(row))
+        keep = self.root/'envs/analysis/notes'; keep.parent.mkdir(); keep.write_text('separate environment')
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, '{"success":true}', ''))
+        with patch.object(m, 'release', return_value=config), patch.object(m, 'using_science', return_value=False), \
+             contextlib.redirect_stdout(io.StringIO()):
+            evidence = m.adoption_evidence(self.root, self.home, binary)
+            m.write_migration_receipt(self.root, self.home, binary, evidence)
+            self.assertFalse(m.sync(self.root, config, runner=runner, existing=True, home=self.home, mm=binary))
+            self.assertEqual(m.ownership_json(self.receipt)['phase'], 'installed')
+            self.assertTrue(m.owned_science(self.root))
+        argv = runner.call_args.args[0]
+        self.assertEqual(argv[1], 'update')
+        self.assertEqual(argv[argv.index('-p') + 1], self.prefix)
+        self.assertIn('--dry-run', argv)
+        runner.assert_called_once()
+        self.assertEqual(keep.read_text(), 'separate environment')
 
     def test_saved_optional_config_preserved_for_other_root(self):
         path = self.home/'science-release.json'
@@ -201,17 +291,15 @@ class TestCandidate(unittest.TestCase):
         self.assertEqual(m.science_config.read_json(path), m.science_config.defaults(ROOT/'linux'))
         self.assertEqual(next(self.home.glob('*pre-reset*')).read_bytes(), before)
 
-    def test_native_heartbeat_exit_and_bounded_output(self):
-        output = Mock()
-        argv = [sys.executable, '-c', 'import sys,time; print("json"); print("warning",file=sys.stderr); time.sleep(.4); sys.exit(17)']
-        result = installer.run_package_process(argv, interval=.05, timeout=10, output=output)
+    def test_native_timeout_exit_and_bounded_output(self):
+        argv = [sys.executable, '-c', 'import sys; print("json"); print("warning",file=sys.stderr); sys.exit(17)']
+        result = installer.run_package_process(argv, timeout=10)
         self.assertEqual((result.returncode, result.stdout.strip(), result.stderr.strip()), (17, 'json', 'warning'))
-        self.assertTrue(any('process: ACTIVE' in item.args[0] for item in output.call_args_list))
         result = installer.run_package_process([sys.executable, '-c', 'print("x"*10000)'], capture_limit=32)
         self.assertNotEqual(result.returncode, 0); self.assertEqual(result.stdout, '')
         self.assertIn('Capture limit exceeded', result.stderr)
         with self.assertRaises(subprocess.TimeoutExpired):
-            installer.run_package_process([sys.executable, '-c', 'import time; time.sleep(20)'], timeout=.2, output=Mock())
+            installer.run_package_process([sys.executable, '-c', 'import time; time.sleep(20)'], timeout=.2)
 
 
 if __name__ == '__main__':

@@ -109,6 +109,20 @@ try {
         Expect-Failure {Initialize-ScienceConfiguration -Path $active -Root $oldRoot}
         Assert-True ((Hash-File $active) -eq $hash);Assert-True ((Hash-File $marker) -eq $markerHash)
     }
+    Test-Case 'edited-active-configuration-can-be-associated-with-legacy-root' {
+        $active=Join-Path $work 'adoption/config/science-release.json'
+        $value=Initialize-ScienceConfiguration -Path $active
+        $value.ScientificPackages+=@('pytorch=*=cpu*')
+        Put-Json $active $value
+        $hash=Hash-File $active
+        $oldRoot=Join-Path $work 'adoption/root'
+        [void][IO.Directory]::CreateDirectory((Join-Path $oldRoot 'envs/science'))
+        $result=Initialize-ScienceConfiguration -Path $active -Root $oldRoot -UseExistingReviewer {'yes'}
+        Assert-True ($result.ScientificPackages -ccontains 'pytorch=*=cpu*')
+        Assert-True ((Hash-File $active) -ceq $hash)
+        $result=Initialize-ScienceConfiguration -Path $active -Root $oldRoot
+        Assert-True ($result.ScientificPackages -ccontains 'pytorch=*=cpu*')
+    }
     Test-Case 'dynamic-legacy-source-is-never-executed' {
         $dir=Join-Path $work 'dynamic';[void][IO.Directory]::CreateDirectory($dir)
         $old=Join-Path $dir 'science-release.json';Copy-Item (Join-Path $fixtures 'windows-legacy.json') $old
@@ -241,7 +255,7 @@ try {
         $path=Join-Path $work 'scope-upgrade/science-release.json';$value=Get-ScienceDefaultConfiguration
         $value.ScientificPackages=@($value.ScientificPackages|Where-Object {$_ -cne 'shap'});Put-Json $path $value
         $markers=@()
-        foreach($name in @('science','py314-opencv5-cuda')){$marker=Join-Path $work ('scope-upgrade/root/envs/'+$name+'/KEEP');[void][IO.Directory]::CreateDirectory((Split-Path -Parent $marker));[IO.File]::WriteAllText($marker,'unchanged');$markers+=,$marker}
+        foreach($name in @('science','research-extras')){$marker=Join-Path $work ('scope-upgrade/root/envs/'+$name+'/KEEP');[void][IO.Directory]::CreateDirectory((Split-Path -Parent $marker));[IO.File]::WriteAllText($marker,'unchanged');$markers+=,$marker}
         $null=Update-ScienceReleasePackages -Path $path -Interactive $true -Reviewer {'yes'}
         foreach($marker in $markers){Assert-True ([IO.File]::ReadAllText($marker) -ceq 'unchanged')}
     }
@@ -259,7 +273,7 @@ try {
             Assert-True ($specs.Count -eq 42)
         }finally{$env:LOCALAPPDATA=$previousLocal}
     }
-    Test-Case 'v0.9.1-release-preserves-saved-requests-and-layout-lineage' {
+    Test-Case 'v0.9.2-release-preserves-saved-requests-and-layout-lineage' {
         $previousLocal=$env:LOCALAPPDATA
         try {
             $env:LOCALAPPDATA=Join-Path $work 'camera-release'
@@ -270,7 +284,7 @@ try {
             $before=Hash-File $path
             $release=Get-ScienceEffectiveRelease
             $ubuntu=Get-Content -LiteralPath (Join-Path $root 'linux/science-installer-release.json') -Raw | ConvertFrom-Json
-            Assert-True ($release.InstallerVersion -ceq '0.9.1' -and $release.InstallerVersion -ceq $ubuntu.InstallerVersion)
+            Assert-True ($release.InstallerVersion -ceq '0.9.2' -and $release.InstallerVersion -ceq $ubuntu.InstallerVersion)
             Assert-True ($release.Version -ceq '12' -and $release.Revision -eq 2)
             Assert-True ($release.ScientificPackages -ccontains 'pytorch=*=cpu*')
             Assert-True ((Hash-File $path) -eq $before)

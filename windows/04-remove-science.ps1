@@ -45,34 +45,34 @@ if (-not $layout) {
 
 Write-Host "Mode       : $($layout.Mode)"
 Write-Host "Root       : $($layout.Root)"
-Write-Host "Environment: $($layout.Science)"
 Write-Host "micromamba : $($layout.Micromamba)"
 
 try {
     Assert-ScienceTransactionPath $layout.Science
     Assert-ScienceTransactionPath $layout.Micromamba
+    $state=Get-SciencePreparedInstallationState $layout
+    Assert-ScienceOwnedPrefix $layout $state
+    Assert-ScienceRegularPath $layout.Micromamba
+    if((Get-ScienceFileSha256 $layout.Micromamba) -cne $ScienceRelease.MicromambaSha256){
+        throw 'The selected Micromamba executable does not match the release checksum.'
+    }
+    Assert-ScienceNotInUse $layout
+    if(-not (Test-ScienceInteractiveConfiguration)){throw 'Science removal requires an interactive console.'}
+    Show-OtherInstallationSummary
+    Write-Host "Selected environment: $($layout.Science)"
+    if((Read-Host 'Remove Science environment and its shortcuts? [y/N]').Trim() -notmatch '^(?i:y|yes|j|ja)$'){
+        Write-Host 'Science removal cancelled.'
+        exit 0
+    }
+
     $lockPath=Join-Path $layout.Root '.science-update.lock'
     Assert-ScienceTransactionPath $lockPath
     $lock=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
     try {
         $state=Get-SciencePreparedInstallationState $layout
         Assert-ScienceOwnedPrefix $layout $state
+        Assert-ScienceNotInUse $layout
         Assert-ScienceRegularPath $layout.Micromamba
-        if((Get-ScienceFileSha256 $layout.Micromamba) -cne $ScienceRelease.MicromambaSha256){
-            throw 'The selected Micromamba executable does not match the release checksum.'
-        }
-        Assert-ScienceNotInUse $layout
-        if(-not (Test-ScienceInteractiveConfiguration)){throw 'Science removal requires an interactive console.'}
-        Show-OtherInstallationSummary
-        Write-Host 'This removes only the installer-owned Science environment and its launchers.'
-        if((Read-Host 'Remove the science environment? [y/N]').Trim() -notmatch '^(?i:y|yes|j|ja)$'){
-            Write-Host 'No changes were made.'
-            exit 0
-        }
-
-        $state=Get-SciencePreparedInstallationState $layout
-        Assert-ScienceOwnedPrefix $layout $state
-        Assert-ScienceNotInUse $layout
         if((Get-ScienceFileSha256 $layout.Micromamba) -cne $ScienceRelease.MicromambaSha256){
             throw 'Micromamba changed during removal review.'
         }

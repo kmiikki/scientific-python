@@ -3,7 +3,8 @@ param(
     [ValidateSet('Auto', 'Home', 'Safe')]
     [string]$Mode = 'Auto',
 
-    [switch]$SkipReleaseDefaultOffer
+    [switch]$SkipReleaseDefaultOffer,
+    [switch]$PyTorchSelectionReviewed
 )
 . (Join-Path $PSScriptRoot 'science-integrity.ps1')
 Assert-ScienceBundle $PSScriptRoot
@@ -419,9 +420,15 @@ catch {
 }
 
 try {
-    $null=Initialize-ScienceConfiguration -Root $layout.Root
+    $interactive=Test-ScienceInteractiveConfiguration
+    $configReview=@{}
+    if($interactive){$configReview.UseExistingReviewer={param($prompt) Read-Host $prompt}}
+    $null=Initialize-ScienceConfiguration -Root $layout.Root @configReview
     if(-not $SkipReleaseDefaultOffer){
-        $null=Update-ScienceReleasePackages -Interactive (Test-ScienceInteractiveConfiguration)
+        $null=Update-ScienceReleasePackages -Interactive $interactive
+    }
+    if(-not $PyTorchSelectionReviewed -and $interactive -and -not (Test-Path -LiteralPath $layout.Science)){
+        if(-not (Select-ScienceOptionalPackages -Fresh)){exit 0}
     }
     $script:ScienceRelease=Get-ScienceEffectiveRelease
     Assert-ScienceWorkflowConfiguration $script:ScienceRelease
@@ -435,8 +442,7 @@ try {
 }
 
 Write-Host ''
-Write-Host "Scientific Python $($ScienceRelease.InstallerVersion) installer"
-Write-Host '==========================='
+Write-ScienceInstallerHeading $ScienceRelease.InstallerVersion
 Write-Host ''
 Write-Host "Mode        : $($layout.Mode)"
 Write-Host "Root prefix : $($layout.Root)"
@@ -506,8 +512,9 @@ $downloadUrl = "https://github.com/mamba-org/micromamba-releases/releases/downlo
 $tempExe = Join-Path $layout.Tmp ('micromamba-' + [guid]::NewGuid().ToString('N') + '.exe')
 
 $needDownload = $true
+$hadExecutable = Test-Path -LiteralPath $layout.Micromamba -PathType Leaf
 
-if (Test-Path -LiteralPath $layout.Micromamba -PathType Leaf) {
+if ($hadExecutable) {
     try {
         $existingVersion = (& $layout.Micromamba --version | Out-String).Trim()
     }
@@ -557,7 +564,32 @@ if ($needDownload) {
         Remove-Item -LiteralPath $tempExe -Force
         Stop-Install 'micromamba SHA256 does not match the pinned Windows standalone artifact.'
     }
-    Move-Item -LiteralPath $tempExe -Destination $layout.Micromamba -Force
+    if ($hadExecutable) {
+        Move-Item -LiteralPath $tempExe -Destination $layout.Micromamba -Force
+    } else {
+        $downloadedSignature = $null
+        try {
+            . (Join-Path $PSScriptRoot 'science-root-removal.ps1')
+            Initialize-ScienceRootNative
+            $downloadedSignature = [ScienceRootNative]::Inspect($tempExe,$false)
+        } catch {
+            Write-Verbose ('Could not identify the downloaded executable: ' + $_.Exception.Message)
+        }
+        [IO.File]::Move($tempExe,$layout.Micromamba)
+        # Record ownership only for the exact executable placed by this installer.
+        try {
+            $state = Get-SciencePreparedInstallationState $layout
+            Assert-ScienceRegularPath $layout.Micromamba
+            if ($downloadedSignature -and $state.micromamba_existed_before -is [bool] -and
+                -not $state.micromamba_existed_before -and
+                [ScienceRootNative]::Inspect($layout.Micromamba,$false) -ceq $downloadedSignature) {
+                $state | Add-Member -NotePropertyName micromamba_file_signature -NotePropertyValue $downloadedSignature -Force
+                Write-ScienceTransactionJson $layout.State $state
+            }
+        } catch {
+            Write-Verbose ('Could not record Micromamba executable ownership: ' + $_.Exception.Message)
+        }
+    }
 }
 
 $actualVersion = (& $layout.Micromamba --version | Out-String).Trim()
@@ -637,6 +669,8 @@ try {
 }
 
 
+Write-Host ''
+Write-ScienceInstallerHeading $ScienceRelease.InstallerVersion
 Write-Host ''
 Write-Host 'Scientific Python installation/update completed successfully.' -ForegroundColor Green
 Write-Host ''

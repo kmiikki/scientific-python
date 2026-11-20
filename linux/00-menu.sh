@@ -4,8 +4,10 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=science-common.sh
 . "$SCRIPT_DIR/science-common.sh"
 version="$(python3 -B "$MANAGER" release-version)" || exit 1
+header="Scientific Python $version (Ubuntu LTS)"
 while true; do
-    printf '\nScientific Python %s (Ubuntu LTS)\n1  Install/update Scientific Python\nO  Configure optional packages and install/update\n2  Remove Spyder settings\n3  Remove science\n4  Remove owned Micromamba executable (preserve root/cache)\n5  Total Remove: entire verified Micromamba root\nI  Info\nD  Diagnostics\nV  Validation only\nU  USB Camera Test (optional)\nC  Package configuration location\nQ  Quit\n' "$version"
+    printf '\n%s\n%s\n\n' "$header" "${header//?/=}"
+    printf '1  Install/update Scientific Python\nO  Configure optional packages and install/update\n2  Remove Spyder settings\n3  Remove Science environment\n4  Remove Micromamba installed by Scientific Python\n5  Total Remove – delete selected Micromamba directory and all contents\nI  Info\nD  Diagnostics\nV  Validation only\nU  USB Camera Test (optional)\nC  Package configuration location\nQ  Quit\n'
     read -r -p 'Selection: ' choice || exit 0
     case "$choice" in
         1) script=01-install-science.sh ;;

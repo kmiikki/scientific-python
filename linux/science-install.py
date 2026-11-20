@@ -39,6 +39,11 @@ def step(number, status):
     print('[{}/9] {:32} {}'.format(number, LABELS[number - 1], status), flush=True)
 
 
+def print_installer_heading(version):
+    heading = f'Scientific Python {version} (Ubuntu LTS)'
+    print(f'\n{heading}\n' + '=' * len(heading) + '\n')
+
+
 def ask(prompt, default=None, reader=input):
     answer = reader(prompt).strip()
     return answer if answer else default
@@ -324,7 +329,7 @@ def select_inventory_root(detection, env=None, reader=input, removal=False, tota
               ', '.join(row['environments']) or 'none found', ', '.join(row['unknown']) or 'none found'))
     print('[0] Cancel')
     key = str(roots.index(default) + 1) if default is not None else None
-    answer = ask('Select root [{}]: '.format(key or 'no default'), key, reader)
+    answer = ask('Select Micromamba directory [{}]: '.format(key or 'no default'), key, reader)
     if answer in (None, '0'):
         return None, None
     if not answer.isascii() or not answer.isdecimal() or len(answer) > 3 or not 1 <= int(answer) <= len(roots):
@@ -333,7 +338,7 @@ def select_inventory_root(detection, env=None, reader=input, removal=False, tota
     root = Path(name)
     if str(root.resolve()) != name:
         raise m.InstallError('Root is redirected or noncanonical. No changes made.')
-    if removal and not total and name != default and reader('Type the exact selected root {}: '.format(name)) != name:
+    if removal and not total and name != default and reader('Type the exact selected directory {}: '.format(name)) != name:
         raise m.InstallError('The root path did not match exactly. No changes made.')
     binaries = details[name]['executables']
     mm = Path(env['MAMBA_EXE']) if env.get('MAMBA_EXE') in binaries else (Path(binaries[0]) if len(binaries) == 1 else None)
@@ -345,9 +350,9 @@ def confirm_total_removal(root, is_default, reader=input, output=print):
         raise m.InstallError('Total Remove requires interactive terminal input and output.')
     phrase = 'Yes, I do understand.'
     try:
-        if not is_default and reader('Type the exact selected root {}: '.format(root)) != str(root):
+        if not is_default and reader('Type the exact selected directory {}: '.format(root)) != str(root):
             return False
-        output('FIRST CONFIRMATION: {} and all listed contents will be permanently removed.'.format(root))
+        output('First confirmation for {}'.format(root))
         if reader('Type exactly "{}": '.format(phrase)) != phrase:
             return False
         output('FINAL CONFIRMATION: removal of {} cannot be undone.'.format(root))
@@ -358,18 +363,12 @@ def confirm_total_removal(root, is_default, reader=input, output=print):
 
 def total_remove_action(root, home, detected, is_default):
     plan = m.total_removal_plan(root, home, detected)
-    print('DELETE the whole directory: ' + str(root))
-    print('DELETE executable: ' + str(root / 'bin/micromamba'))
-    print('DELETE private cache: ' + str(root / 'pkgs'))
-    if (root / 'conda-meta/history').is_file():
-        print('DELETE environment: base')
-    for prefix in plan['tree']['prefixes']:
-        print('DELETE environment: ' + str(prefix))
-    for launcher in plan['launchers']:
-        print('DELETE owned launcher: ' + launcher['path'])
+    print('Selected Micromamba directory:', root, '', 'This will permanently delete:', '',
+          '- All environments in this directory', '- Package caches',
+          '- All other files, including user files', '',
+          'The selected directory and its entire contents will be deleted.', sep='\n')
     if plan['registry'] and plan['registry']['original'] != plan['registry']['new']:
-        print('REMOVE only registrations for the listed prefixes from: ' + plan['registry']['path'])
-    print('PRESERVE: other roots, external environments and caches, shared Bash settings, Spyder settings and package configuration.')
+        print('Environment registrations for this directory will be removed from: ' + plan['registry']['path'])
     if not confirm_total_removal(root, is_default):
         print('Cancelled. Nothing was removed.')
         return 0
@@ -377,18 +376,34 @@ def total_remove_action(root, home, detected, is_default):
     return 0
 
 
-def review_migration(root, home, reader=input):
+def remove_micromamba_action(root, home, reader=input):
+    binary, _ = m.root_removal_plan(root, home)
+    print('Micromamba executable:', binary['path'], 'Micromamba directory:', root,
+          'This Micromamba may also manage other Python environments.',
+          'All environments and package caches will be preserved.', sep='\n')
+    if ask('Remove this Micromamba executable? [y/N]: ', 'n', reader).lower() not in ('y', 'yes'):
+        print('Micromamba removal cancelled.')
+        return 0
+    m.remove_root(root, home, approved=binary)
+    return 0
+
+
+def review_migration(root, home, mm, reader=input):
     prefix = root / 'envs/science'
     if not prefix.exists() or m.owned_science(root):
         return None
     try:
         evidence = m.migration_evidence(root, home)
-    except (m.InstallError, m.safety.SafetyError, OSError, ValueError) as error:
-        raise m.InstallError('Cannot verify legacy Science: {}. The environment was preserved. Compare the original installer state, launcher, configuration and Conda history with a trusted backup. If these cannot be recovered, choose a separate new root and leave {} intact.'.format(error, prefix)) from error
+    except (m.InstallError, m.safety.SafetyError, OSError, ValueError):
+        try:
+            evidence = m.adoption_evidence(root, home, mm)
+        except (m.InstallError, m.safety.SafetyError, OSError, ValueError) as error:
+            raise m.InstallError('Cannot adopt the selected Science prefix: {}. Review its path and existing installer or Conda metadata before retrying.'.format(error)) from error
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise m.InstallError('Legacy migration requires an interactive terminal. No changes made.')
-    print('Verified legacy Science evidence: {} at {}. This migration allows an update; it does not authorize root, cache or environment removal.'.format(evidence['format'], prefix))
-    if ask('Approve environment ownership metadata migration? [y/N]: ', 'n', reader).lower() not in ('y', 'yes'):
+    print('Existing Science to adopt for an in-place update: {}'.format(prefix))
+    print('Verified evidence: {}. Micromamba: {}'.format(evidence['format'], mm))
+    if ask('Adopt this Science prefix for update? [y/N]: ', 'n', reader).lower() not in ('y', 'yes'):
         raise PreparationPending('Legacy migration declined. The existing environment was preserved.')
     return evidence
 
@@ -479,19 +494,24 @@ def recheck_usage(prefix, operation, reader=input):
 
 
 def remove_action(root, mm, home, reader=input):
+    prefix = root / 'envs/science'
+    heading = 'Remove Science environment'
+    target = 'Selected environment: ' + str(prefix)
+    print(heading, target, sep='\n')
+    if ask('Remove Science environment and its shortcuts? [y/N]: ', 'n', reader).lower() != 'y':
+        print('Science removal cancelled.')
+        return 0
     logdir = home / '.local/state/scientific-python/logs';m.safety.plain_path(logdir, missing=True);logdir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     log = logdir / (stamp + '.removal.log');report_path = logdir / (stamp + '.removal.json')
     old_out, old_err = sys.stdout, sys.stderr;result = {'status': 'BLOCKED', 'phase': 'preconditions'}
     with log.open('x') as stream:
-        os.chmod(log, 0o600);sys.stdout, sys.stderr = Tee(old_out, stream), Tee(old_err, stream)
+        os.chmod(log, 0o600)
+        print(heading, target, sep='\n', file=stream)
+        sys.stdout, sys.stderr = Tee(old_out, stream), Tee(old_err, stream)
         try:
-            print('Scientific Python Ubuntu — science removal')
-            print('Selected environment: ' + str(root / 'envs/science'))
-            if not recheck_usage(root / 'envs/science', 'removed', reader):
-                result.update(usage=m.processes.inspect(root / 'envs/science'),instruction='Resolve the listed science users and run removal again. No deletion was started.');return 2
-            if ask('Remove only the owned science environment and launchers? [y/N]: ', 'n', reader).lower() != 'y':
-                result.update(status='PENDING',reason='Removal was not approved.');return 2
+            if not recheck_usage(prefix, 'removed', reader):
+                result.update(usage=m.processes.inspect(prefix),instruction='Resolve the listed science users and run removal again. No deletion was started.');return 2
             while True:
                 try:
                     result = m.remove_science(root, home=home, mm=mm, runner=logged_runner)
@@ -504,7 +524,7 @@ def remove_action(root, mm, home, reader=input):
                 except m.UsageBlocked as error:
                     result = {'status':'BLOCKED','usage':error.report,'reason':str(error)}
                     print(str(error))
-                    if not recheck_usage(root / 'envs/science', 'removed', reader):return 2
+                    if not recheck_usage(prefix, 'removed', reader):return 2
         except (m.InstallError, OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as error:
             result=getattr(error, 'removal_report', {'status':'FAIL','reason':str(error),'instruction':'Review the named target and ownership/registry checks. Do not remove the root or shared cache. Retry only the science operation after resolving the reported issue.'});print(json.dumps(result, indent=2));return 1
         finally:
@@ -580,7 +600,7 @@ def preflight(mode, root, mm, config, shortcut, validate=False):
     values = current_versions(root, mm)
     installed = m.records(root / 'envs/science')
     action = 'Validation only' if validate else ('Update' if installed else 'Fresh installation')
-    print(f"\nScientific Python {config['InstallerVersion']} (Ubuntu)\n" + '=' * 35)
+    print_installer_heading(config['InstallerVersion'])
     print('Ubuntu            : ' + platform.freedesktop_os_release().get('VERSION_ID', 'unknown'))
     print('Architecture      : ' + platform.machine())
     print('Operation         : ' + action)
@@ -601,9 +621,26 @@ def preflight(mode, root, mm, config, shortcut, validate=False):
 
 
 class Tee:
-    def __init__(self, terminal, log): self.terminal, self.log = terminal, log
-    def write(self, value): self.terminal.write(value); self.log.write(value); self.log.flush()
-    def flush(self): self.terminal.flush(); self.log.flush()
+    def __init__(self, terminal, log, lock=None):
+        self.terminal, self.log = terminal, log
+        self.lock = lock if lock is not None else threading.Lock()
+
+    def write(self, value):
+        with self.lock:
+            self.terminal.write(value)
+            self.log.write(value)
+            self.log.flush()
+
+    def write_log(self, value):
+        with self.lock:
+            self.log.write(value)
+            self.log.flush()
+
+    def flush(self):
+        with self.lock:
+            self.terminal.flush()
+            self.log.flush()
+
     def isatty(self): return self.terminal.isatty()
 
 
@@ -626,7 +663,54 @@ def diagnostics(root, mm, output, home=None, launcher=None):
     return report
 
 
-def run_package_process(argv, env=None, timeout=1800, output=print, interval=5, capture_limit=64 * 1024 * 1024):
+class PackageProgress:
+    """One elapsed clock for the approved package phase, independent of output."""
+
+    def __init__(self, interval=5):
+        self.interval = interval
+        self.lock = threading.Lock()
+        self.stopped = threading.Event()
+        self.worker = None
+        self.last_second = -1
+        self.process = None
+        self.activity = 'Python: preparing approved transaction'
+
+    def start(self):
+        self.started = time.monotonic()
+        self.report()
+        worker = threading.Thread(target=self.heartbeat, name='science-package-progress', daemon=True)
+        worker.start()
+        self.worker = worker
+
+    def stop(self):
+        if self.worker is not None:
+            self.stopped.set()
+            self.worker.join()
+            self.worker = None
+
+    def heartbeat(self):
+        while not self.stopped.wait(self.interval):
+            self.report()
+
+    def set_activity(self, activity, process=None):
+        with self.lock:
+            self.activity, self.process = activity, process
+
+    def report(self):
+        with self.lock:
+            seconds = int(time.monotonic() - self.started)
+            if seconds <= self.last_second:
+                return
+            self.last_second = seconds
+            activity = self.activity
+            if self.process is not None and self.process.poll() is not None:
+                activity = 'Python: collecting Micromamba output'
+            sys.stdout.write('[6/9] Installing packages  RUNNING  Elapsed: {:02}:{:02}  {}\n'
+                             .format(*divmod(seconds, 60), activity))
+            sys.stdout.flush()
+
+
+def run_package_process(argv, env=None, timeout=1800, progress=None, capture_limit=64 * 1024 * 1024):
     """Drain both streams with bounded buffers while the native child runs."""
     start = time.monotonic()
     process = subprocess.Popen([str(arg) for arg in argv], env=env, stdin=subprocess.DEVNULL,
@@ -648,17 +732,18 @@ def run_package_process(argv, env=None, timeout=1800, output=print, interval=5, 
     for thread in threads:
         thread.start()
     try:
-        while True:
-            elapsed = time.monotonic() - start
-            if elapsed >= timeout:
-                raise subprocess.TimeoutExpired(argv, timeout)
-            try:
-                process.wait(timeout=min(interval, timeout - elapsed))
-                break
-            except subprocess.TimeoutExpired:
-                if process.poll() is None and time.monotonic() - start < timeout:
-                    elapsed = round(time.monotonic() - start)
-                    output('[6/9] Installing packages  RUNNING  Elapsed: {:02}:{:02}  Micromamba process: ACTIVE'.format(*divmod(elapsed, 60)), flush=True)
+        if progress:
+            if '--download-only' in argv:
+                activity = 'Micromamba: extracting approved archives'
+            elif '--dry-run' in argv:
+                activity = 'Micromamba: checking offline transaction'
+            else:
+                activity = 'Micromamba: applying approved transaction'
+            progress.set_activity(activity, process)
+        remaining = timeout - (time.monotonic() - start)
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(argv, timeout)
+        process.wait(timeout=remaining)
         for thread in threads:
             thread.join(max(0, min(5, timeout - (time.monotonic() - start))))
         if any(thread.is_alive() for thread in threads) or errors:
@@ -678,6 +763,9 @@ def run_package_process(argv, env=None, timeout=1800, output=print, interval=5, 
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
         raise
+    finally:
+        if progress:
+            progress.set_activity('Python: processing and verifying Micromamba results')
     out, err = [value.decode('utf-8', 'replace') for value in streams]
     if any(overflow):
         # Retain the native exit code and error. Do not accept partial JSON.
@@ -686,14 +774,37 @@ def run_package_process(argv, env=None, timeout=1800, output=print, interval=5, 
     return subprocess.CompletedProcess(argv, process.returncode, out, err)
 
 
-def logged_runner(argv, package_progress=False, **kwargs):
-    logfile = getattr(sys.stdout, 'log', None)
-    if logfile:
-        logfile.write('\nPROCESS: ' + repr([str(a) for a in argv]) + '\n'); logfile.flush()
-    value = (run_package_process if package_progress else m.run_process)(argv, **kwargs)
-    if logfile:
-        logfile.write('EXIT: ' + str(value.returncode) + '\nSTDOUT:\n' + value.stdout + '\nSTDERR:\n' + value.stderr + '\n'); logfile.flush()
+def logged_runner(argv, package_progress=None, **kwargs):
+    write_log = getattr(sys.stdout, 'write_log', None)
+    if write_log:
+        write_log('\nPROCESS: ' + repr([str(a) for a in argv]) + '\n')
+    value = (run_package_process(argv, progress=package_progress, **kwargs) if package_progress
+             else m.run_process(argv, **kwargs))
+    if write_log:
+        write_log('EXIT: ' + str(value.returncode) + '\nSTDOUT:\n' + value.stdout + '\nSTDERR:\n' + value.stderr + '\n')
     return value
+
+
+def install_packages(root, config, on_step=None, *, interval=5, **options):
+    monitor = PackageProgress(interval)
+
+    def progress(number, status):
+        if on_step:
+            on_step(number)
+        if number == 6:
+            if status == 'RUNNING':
+                monitor.start()
+                return
+            monitor.stop()
+        step(number, status)
+
+    def runner(argv, **kwargs):
+        return logged_runner(argv, package_progress=monitor if monitor.worker else None, **kwargs)
+
+    try:
+        return m.sync(root, config, runner=runner, progress=progress, activity=monitor.set_activity, **options)
+    finally:
+        monitor.stop()
 
 
 def run_runtime(root, mm):
@@ -710,7 +821,7 @@ def run_runtime(root, mm):
 
 
 def summary(mode, root, mm, status, runtime, launchers, shortcut, log, report, package_status, other_environments="PENDING", *, release_version):
-    print(f'\nScientific Python {release_version} (Ubuntu)\n' + '=' * 32)
+    print_installer_heading(release_version)
     print('Installation status: ' + status)
     print('Package installation: ' + package_status)
     print('Automatic tests     : ' + runtime.get('status', 'SKIP'))
@@ -742,7 +853,7 @@ def summary(mode, root, mm, status, runtime, launchers, shortcut, log, report, p
     print('Diagnostic report   : ' + str(report))
 
 
-def select_optional_packages(reader=None, output=print):
+def select_optional_packages(reader=None, output=print, *, fresh=False):
     reader = reader or input
     config = m.science_config
     path = config.active_path()
@@ -751,35 +862,39 @@ def select_optional_packages(reader=None, output=print):
     if m.safety.read_regular(path)[0] != original:
         raise config.ConfigError('Configuration changed while reading; start again.')
     backend = config.pytorch_backend(value['ScientificPackages'])
-    cuda_available = m.has_nvidia_device()
-    output('Optional packages')
+    output('PyTorch for this fresh Science installation' if fresh else 'Optional packages')
     output('Configured PyTorch backend: ' + backend.upper())
-    output('NVIDIA CUDA device: ' + ('detected; compatibility will be checked by the solver' if cuda_available else 'unavailable'))
+    if fresh:
+        output('The selection is saved in the active package configuration.')
+        output('0  No PyTorch (default)')
     output('1  PyTorch CPU')
     output('2  PyTorch NVIDIA CUDA')
-    output('R  Remove the PyTorch request')
+    if not fresh:
+        output('R  Remove the PyTorch request')
     output('Q  Back')
+    choices = ('0', '1', '2', 'q') if fresh else ('1', '2', 'r', 'q')
     while True:
-        choice = ask('Optional packages: ', 'q', reader).lower()
-        if choice in ('1', '2', 'r', 'q'):
-            if choice == '2' and not cuda_available:
-                output('CUDA requires a working NVIDIA driver and a detectable GPU.')
-                continue
+        choice = ask('PyTorch [0]: ' if fresh else 'Optional packages: ', '0' if fresh else 'q', reader).lower()
+        if choice in choices:
+            if choice == '2':
+                if not m.has_nvidia_device():
+                    output('CUDA requires a working NVIDIA driver and a detectable GPU.')
+                    continue
+                output('NVIDIA CUDA device detected. The solver will check compatibility.')
             break
         output('Unknown selection.')
     if choice == 'q':
         return False
     if choice == 'r' and ask('Remove the configuration request only? [y/N]: ', 'n', reader).lower() not in ('y', 'yes'):
         return False
-    selection = {'1': 'cpu', '2': 'cuda', 'r': 'remove'}[choice]
+    selection = {'0': 'remove', '1': 'cpu', '2': 'cuda', 'r': 'remove'}[choice]
     backup = config.choose_pytorch_request(BUNDLE, selection, path, expected=original)
     if backup:
         output('Previous package configuration saved to ' + str(backup))
-    if selection == 'remove':
+    if choice == 'r':
         output('PyTorch is no longer requested. Installed packages were preserved.')
         return False
-    output('PyTorch ' + selection.upper() + ' selected.')
-    output('Installation/update will follow now; no second menu selection is needed. Proposed package changes require separate approval.')
+    output('No PyTorch selected.' if choice == '0' else 'PyTorch ' + selection.upper() + ' selected.')
     return True
 
 
@@ -834,7 +949,8 @@ def main():
     home = Path.home(); config = m.release()
     detected = detect(home)
     if args.action == 'info':
-        print(f"Scientific Python {config['InstallerVersion']}; Ubuntu 24.04/26.04 x86-64")
+        print_installer_heading(config['InstallerVersion'])
+        print('Ubuntu 24.04/26.04 x86-64')
         print('Installer layout lineage: V4-r5.2')
         print('Default new root: ' + str(home / 'micromamba'))
         print('Science path: <selected root>/envs/science')
@@ -865,23 +981,25 @@ def main():
     else:
         mode, root, mm = select(home, detection=detected, manage_science=False)
     step(2, 'PASS')
-    print('Root: {}\nMicromamba executable: {}'.format(root, mm or 'unverified'))
-    migration = review_migration(root, home) if args.action in ('install', 'optional') else None
+    if args.action != 'remove-root':
+        print('Root: {}\nMicromamba executable: {}'.format(root, mm or 'unverified'))
+    migration = review_migration(root, home, mm) if args.action in ('install', 'optional') else None
     if args.action in ['install', 'optional', 'validate']:
         try:
             interactive = sys.stdin.isatty() and sys.stdout.isatty()
-            if args.action != 'validate' and interactive and not (root / 'envs/science').exists():
-                m.science_config.review_new_root_configuration(BUNDLE, root, detected['prior'])
+            fresh = not (root / 'envs/science').exists()
+            if args.action != 'validate' and interactive and fresh:
+                m.science_config.review_new_root_configuration(BUNDLE, root, detected['prior'], reader=input)
             if migration and migration['format'] == 'ubuntu-lts-v3' and not m.science_config.active_path().exists():
                 print('V3 had no saved configuration file. Use the verified archived requests with the current release constraints?')
                 if ask('Approve recovery of the V3 package configuration? [y/N]: ', 'n').lower() not in ('y', 'yes'):
                     raise PreparationPending('V3 configuration recovery declined. No environment changes made.')
                 m.science_config.recover_v3(BUNDLE, root, m.LEGACY_V3_SPECS, m.history_specs(root / 'envs/science'))
-            m.science_config.initialize(BUNDLE, root=root)
+            m.science_config.initialize(BUNDLE, root=root, reviewer=input if interactive and args.action != 'validate' else None)
             if args.action == 'install':
-                m.science_config.offer_release_packages(BUNDLE,interactive=sys.stdin.isatty() and sys.stdout.isatty())
-            elif args.action == 'optional':
-                if not select_optional_packages():
+                m.science_config.offer_release_packages(BUNDLE, interactive=interactive)
+            if args.action == 'optional' or (args.action == 'install' and fresh and interactive):
+                if not select_optional_packages(fresh=fresh):
                     return 0
                 args.action = 'install'
             config = m.release()
@@ -897,21 +1015,14 @@ def main():
         print('Diagnostic collection: SUCCESS. Runtime findings are reported independently.\nReport: ' + str(output)); return 0
     if args.action == 'remove-science':
         return remove_action(root, mm, home)
-    if args.action.startswith('remove-'):
-        if args.action == 'remove-settings':
-            target = m.safety.settings_directory(root, home)
-            m.safety.settings_plan(root, home)
-            print('Shared ~/.config/spyder-py3 and legacy science Spyder settings are preserved.')
-            if ask('Remove owned Spyder settings at {}? [y/N]: '.format(target), 'n').lower() == 'y':
-                m.remove_settings(home, root=root)
-            return 0
-        if args.action == 'remove-root':
-            m.root_removal_plan(root, home)
-            print('Only the verified installer-owned binary and owned launchers are removal targets.')
-            print('Root directory, package cache, user files, environment registries and Bash configuration will be preserved.')
-        if ask('Remove {}? [y/N]: '.format(root / 'envs/science' if args.action == 'remove-science' else root / 'bin/micromamba'), 'n').lower() != 'y': return 0
-        if args.action == 'remove-science': m.remove_science(root, mm=mm)
-        else: m.remove_root(root)
+    if args.action == 'remove-root':
+        return remove_micromamba_action(root, home)
+    if args.action == 'remove-settings':
+        target = m.safety.settings_directory(root, home)
+        m.safety.settings_plan(root, home)
+        print('Shared ~/.config/spyder-py3 and legacy science Spyder settings are preserved.')
+        if ask('Remove owned Spyder settings at {}? [y/N]: '.format(target), 'n').lower() == 'y':
+            m.remove_settings(home, root=root)
         return 0
     requested = args.action != 'validate' and ask('Create desktop shortcut? [Y/n]: ', 'y').lower() in ['y', 'yes']
     directory = desktop_directory(home) if requested else None
@@ -920,7 +1031,6 @@ def main():
     if requested and support == 'Unsupported': print('Desktop icons are unsupported: the GNOME desktop icons extension is not enabled. The application menu launcher will still be installed.')
     if requested and not directory: print('Desktop shortcut unavailable: xdg-user-dir DESKTOP did not return a usable desktop directory.')
     if shortcut: print('Desktop icons support: ' + support + '. Trust will be applied and read back for this approved launcher; unsupported sessions receive a manual instruction.')
-    preflight(mode, root, mm, config, shortcut, args.action == 'validate')
     logdir = home / '.local/state/scientific-python/logs'
     m.safety.plain_path(logdir, missing=True)
     logdir.mkdir(parents=True, exist_ok=True)
@@ -931,7 +1041,8 @@ def main():
     old_stdout, old_stderr = sys.stdout, sys.stderr
     with log.open('x', encoding='utf-8') as logfile:
         os.chmod(log, 0o600)
-        sys.stdout, sys.stderr = Tee(old_stdout, logfile), Tee(old_stderr, logfile)
+        log_lock = threading.Lock()
+        sys.stdout, sys.stderr = Tee(old_stdout, logfile, log_lock), Tee(old_stderr, logfile, log_lock)
         session = contextlib.ExitStack(); session_locked = False
         try:
             if root.exists():
@@ -954,14 +1065,11 @@ def main():
                 if not recheck_usage(root / 'envs/science', 'updated'): raise m.UsageBlocked(m.processes.inspect(root / 'envs/science'), 'updated')
                 if migration is not None:
                     m.write_migration_receipt(root, home, mm, migration)
-                def progress(number, status):
+                def select_step(number):
                     nonlocal current_step
                     current_step = number
-                    step(number, status)
                 before_others = m.lifecycle.other_environments(root)
-                def package_runner(argv, **kwargs):
-                    return logged_runner(argv, package_progress=current_step == 6, **kwargs)
-                changed = m.sync(root, config, runner=package_runner, mm=mm, existing=mode == 'Existing', progress=progress)
+                changed = install_packages(root, config, on_step=select_step, mm=mm, existing=mode == 'Existing')
                 package_status = 'SUCCESS' if changed else 'Already up to date'
                 if not changed: print('Operation: Already up to date (package transaction skipped).')
                 previous = m.read_state(root)
@@ -990,11 +1098,6 @@ def main():
                 existing = read_index(home)
                 if str(root) not in existing: m.write_json(index_file(home), existing + [str(root)])
             current_step = 9; diagnostics(root, mm, report_path, home, launchers)
-            if args.action != 'validate' and package_status == 'SUCCESS' and not os.path.lexists(root / m.DEDICATED_ROOT_RECEIPT):
-                try:
-                    m.seal_dedicated_root(root)
-                except (m.InstallError, m.safety.SafetyError, OSError, ValueError) as error:
-                    print('Total Remove unavailable for this root: ' + str(error))
             step(9, 'PASS'); result = 'SUCCESS'
         except (m.InstallError, m.safety.SafetyError, OSError, ValueError, subprocess.SubprocessError, EOFError, KeyboardInterrupt) as exc:
             result = 'PENDING' if isinstance(exc, PreparationPending) else 'BLOCKED' if isinstance(exc, (m.UsageBlocked, m.OperationBlocked)) else 'FAIL'

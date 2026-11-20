@@ -81,15 +81,30 @@ $setup={
         return @{ExitCode=0;Stdout=($fixture.Plan|ConvertTo-Json -Depth 64);Stderr=''}
     }
 }
-function Review-Fixture {param($Fixture);Invoke-ScienceReviewedTransaction $Fixture.Layout $Fixture.Before $Fixture.Plan $Fixture.Config}
+function Review-Fixture {
+    param($Fixture,[scriptblock]$VerifyPackages)
+    Invoke-ScienceReviewedTransaction $Fixture.Layout $Fixture.Before $Fixture.Plan $Fixture.Config -VerifyPackages $VerifyPackages
+}
 function Check-HookRestored {param($Fixture);Check ((Get-ScienceFileSha256 $Fixture.Hook) -ceq $Fixture.HookHash) 'GTK hook not restored';Check (@(Get-ChildItem $Fixture.Layout.Tmp -Filter 'librsvg-hook-*.original').Count -eq 0) 'GTK backup not cleaned'}
 Case 'actual-executor-idle-callback-resolves-all-helpers-and-restores-gtk' {
     . $setup
-    Review-Fixture $fixture
+    Review-Fixture $fixture {
+        Check ($callbackTestState.CommitCalls -eq 1) 'Final verification ran before the commit'
+        Check-HookRestored $fixture
+        Check ((Get-ScienceRecords $fixture.Layout.Science)['science-root'].version -ceq '2.0')
+        $callbackTestState.Verified=$true
+    }
+    Check $callbackTestState.Verified 'The installed package verification was not called'
     Check ($callbackTestState.CommitCalls -eq 1 -and $callbackTestState.NativeCalls -eq 3)
     Check ($callbackTestState.GuardObserved -and $callbackTestState.Prompts.Count -eq 2)
     Check-HookRestored $fixture
     Check ((Get-ScienceRecords $fixture.Layout.Science)['science-root'].version -ceq '2.0')
+}
+Case 'final-package-verification-error-propagates-without-retry' {
+    . $setup
+    Reject {Review-Fixture $fixture {throw 'fixture final package verification failure'}} 'fixture final package verification failure'
+    Check ($callbackTestState.CommitCalls -eq 1 -and $callbackTestState.NativeCalls -eq 3)
+    Check-HookRestored $fixture
 }
 Case 'legacy-getnewclosure-reproduces-helper-visibility-failure-before-commit' {
     . $setup

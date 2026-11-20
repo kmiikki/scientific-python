@@ -19,6 +19,9 @@ WINDOWS = sys.platform == 'win32'
 BACKEND = 'DirectShow' if WINDOWS else 'V4L2'
 VIDEO_NODE = re.compile(r'video([0-9]+)', re.ASCII)
 DISCOVERY_SECONDS = 30
+WINDOWS_STARTUP_SECONDS = 12
+WINDOWS_PREVIEW_INIT_SECONDS = 12
+WINDOWS_PREVIEW_SHUTDOWN_SECONDS = 2
 
 
 def result(status, reason, **details):
@@ -103,8 +106,10 @@ def enumerate_directshow(cv, backend):
                 rows.append([device.cam_idx, '' if name == f'cam: {device.cam_idx}' else name])
     except (cv.error, UnicodeError):
         return result('SKIP', 'ENUMERATION_UNAVAILABLE')
-    if not rows and not registry.isBackendBuiltIn(backend):
-        return result('SKIP', 'ENUMERATION_UNAVAILABLE')
+    if not rows:
+        # Even a built-in DirectShow backend may open an index that the
+        # enumeration API did not list.
+        return result('SKIP', 'ENUMERATION_EMPTY')
     return result('CANDIDATE', 'ENUMERATED', devices=rows)
 
 
@@ -147,7 +152,71 @@ def preview_frames(cv, capture, frame, target, seconds):
             pass
 
 
-def capture_device(target, options, phase, cv, backend, probe=False):
+def preview_windows(cv, capture, frame, target, seconds, phase, notify):
+    """Ready means the first frame was submitted and the GUI event pump returned."""
+    title = f'Scientific Python USB camera - {target}'
+    timing = {}
+    outcome = 'PREVIEW_UNAVAILABLE'
+    window_attempted = False
+
+    def measured(step, operation):
+        notify({'preview_step': step})
+        started = time.monotonic()
+        value = operation()
+        elapsed = time.monotonic() - started
+        timing[step] = round(elapsed, 3)
+        notify({'preview_timing': {step: timing[step]}})
+        return value
+
+    phase('preview_init')
+    init_started = time.monotonic()
+    active_started = None
+    try:
+        if not hasattr(cv, 'currentUIFramework') or measured('ui_backend', cv.currentUIFramework):
+            window_attempted = True
+            measured('named_window', lambda: cv.namedWindow(title, cv.WINDOW_NORMAL))
+            measured('first_imshow', lambda: cv.imshow(title, frame))
+            key = measured('first_wait_key', lambda: cv.waitKey(1))
+            active_started = time.monotonic()
+            timing['initialization'] = round(active_started - init_started, 3)
+            notify({'preview_timing': {'initialization': timing['initialization']}})
+            phase('preview')
+            end = active_started + seconds
+            outcome = 'PREVIEW_COMPLETED'
+            while key & 0xff not in (27, ord('q'), ord('Q')) and time.monotonic() < end:
+                ok, frame = capture.read()
+                if not frame_size(ok, frame):
+                    outcome = 'PREVIEW_STREAM_INTERRUPTED'
+                    break
+                if time.monotonic() >= end:
+                    break
+                cv.imshow(title, frame)
+                key = cv.waitKey(1)
+    except Exception:
+        outcome = 'PREVIEW_UNAVAILABLE' if active_started is None else 'PREVIEW_FAILED'
+    finally:
+        if active_started is None:
+            timing['initialization'] = round(time.monotonic() - init_started, 3)
+        else:
+            timing['display'] = round(time.monotonic() - active_started, 3)
+        notify({'preview_timing': timing.copy()})
+        if window_attempted:
+            phase('preview_shutdown')
+            notify({'preview_outcome': outcome})
+            try:
+                measured('destroy_window', lambda: cv.destroyWindow(title))
+            except Exception:
+                outcome = 'PREVIEW_CLEANUP_FAILED'
+    return outcome, timing
+
+
+class CameraCleanupError(RuntimeError):
+    def __init__(self, value):
+        super().__init__('CAMERA_CLEANUP_FAILED')
+        self.value = value
+
+
+def capture_device(target, options, phase, cv, backend, probe=False, notify=lambda _: None):
     if not WINDOWS:
         # Check again before capture in case a disconnected node was replaced.
         # OpenCV's bool return does not expose errno.
@@ -155,6 +224,8 @@ def capture_device(target, options, phase, cv, backend, probe=False):
         if capabilities['status'] != 'CANDIDATE':
             return {key: value for key, value in capabilities.items() if key not in ('name', 'capabilities')}
     capture = cv.VideoCapture()
+    captured = {}
+    preview_details = {}
     try:
         if not capture.open(target, backend):
             return result('FAIL', 'OPEN_FAILED')
@@ -170,18 +241,35 @@ def capture_device(target, options, phase, cv, backend, probe=False):
             consecutive = consecutive + 1 if size else 0
             had_frames |= size is not None
             if consecutive >= options['frames']:
+                captured = dict(width=size[0], height=size[1], frames=consecutive)
                 preview = 'NOT_REQUESTED'
+                if WINDOWS:
+                    notify({'captured': captured})
                 if options['preview']:
-                    phase('preview')
-                    preview = preview_frames(cv, capture, frame, target, options['preview_seconds'])
-                return result('PASS', 'VALID_FRAMES', width=size[0], height=size[1],
-                              frames=consecutive, preview=preview)
+                    if WINDOWS:
+                        preview, timing = preview_windows(cv, capture, frame, target,
+                                                          options['preview_seconds'], phase, notify)
+                        preview_details = {'preview_timing': timing, 'preview': preview}
+                        notify({'preview_outcome': preview})
+                        if preview != 'PREVIEW_COMPLETED':
+                            return result('FAIL', preview, capture_status='PASS', **captured, **preview_details)
+                    else:
+                        phase('preview')
+                        preview = preview_frames(cv, capture, frame, target, options['preview_seconds'])
+                return result('PASS', 'VALID_FRAMES', **captured, **({'preview': preview} | preview_details))
             if not size:
                 time.sleep(0.02)
         return result('FAIL', 'STREAM_INTERRUPTED' if had_frames else 'NO_VALID_FRAMES')
     finally:
         phase('shutdown')
-        capture.release()
+        try:
+            capture.release()
+        except Exception as error:
+            if not WINDOWS:
+                raise
+            # Release overrides a capture/preview success.
+            raise CameraCleanupError(result('FAIL', 'CAMERA_CLEANUP_FAILED', **captured, **preview_details,
+                                            **({'capture_status': 'PASS'} if captured else {}))) from error
 
 
 def emit(message):
@@ -189,25 +277,36 @@ def emit(message):
 
 
 def worker(action, target, options):
+    def notify(message):
+        if WINDOWS:
+            message = {**message, 'time': time.monotonic()}
+        emit(message)
+
     def phase(name):
-        emit({'phase': name})
+        notify({'phase': name})
     try:
-        phase('open')
+        if not WINDOWS or action == 'query':
+            phase('open')
         if action == 'query':
             value = linux_capabilities(target)
         else:
             try:
                 cv, backend = open_cv()
             except (ImportError, OSError):
-                emit({'result': result('FAIL', 'BACKEND_UNAVAILABLE')})
+                notify({'result': result('FAIL', 'BACKEND_UNAVAILABLE')})
                 return
             if action == 'enumerate':
+                phase('enumerate')
                 value = enumerate_directshow(cv, backend)
             else:
-                value = capture_device(target, options, phase, cv, backend, probe=action == 'probe')
+                if WINDOWS:
+                    phase('open')
+                value = capture_device(target, options, phase, cv, backend, probe=action == 'probe', notify=notify)
+    except CameraCleanupError as error:
+        value = error.value
     except Exception:
         value = result('FAIL', 'WORKER_ERROR')
-    emit({'result': value})
+    notify({'result': value})
 
 
 def read_messages(pipe, messages):
@@ -237,6 +336,9 @@ def stop_worker(process):
 
 def run_worker(action, target, options, budget=None):
     command = [sys.executable, '-IB', __file__, '--worker', json.dumps([action, target, options])]
+    windows_backend = WINDOWS and action != 'query'
+    if windows_backend:
+        started = time.monotonic()
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, encoding='utf-8', errors='replace',
                                start_new_session=not WINDOWS,
@@ -249,10 +351,36 @@ def run_worker(action, target, options, budget=None):
     limits = {'open': options['open_timeout'], 'capture': options['capture_timeout'] + 0.2,
               'preview': options['preview_seconds'] + 1, 'shutdown': 1}
     name = 'open'
-    started = time.monotonic()
+    if windows_backend:
+        limits.update(startup=WINDOWS_STARTUP_SECONDS)
+        if action == 'enumerate':
+            limits['enumerate'] = limits.pop('open')
+        if action == 'test' and options['preview']:
+            limits.update(preview_init=options.get('preview_init_timeout', WINDOWS_PREVIEW_INIT_SECONDS),
+                          preview_shutdown=WINDOWS_PREVIEW_SHUTDOWN_SECONDS)
+        name = 'startup'
+    else:
+        started = time.monotonic()
     hard_end = started + (budget if budget is not None else sum(limits.values()))
     deadline = min(hard_end, started + limits[name])
     value = None
+    captured = {}
+    preview_timing = {}
+    preview_step = None
+    preview_outcome = None
+
+    def failure(reason, **details):
+        if captured:
+            preview = preview_outcome if name == 'shutdown' and preview_outcome else reason
+            details.update(capture_status='PASS', **captured)
+            if options['preview']:
+                details['preview'] = preview
+            if preview_timing:
+                details['preview_timing'] = preview_timing
+            if name == 'preview_init' and preview_step:
+                details['preview_step'] = preview_step
+        return result('FAIL', reason, **details)
+
     try:
         while True:
             message = messages.get(timeout=max(0, deadline - time.monotonic()))
@@ -260,16 +388,33 @@ def run_worker(action, target, options, budget=None):
                 reader.join(timeout=0.1)
                 if process.wait(timeout=max(0, deadline - time.monotonic())) == 0 and value is not None:
                     return value
-                return result('FAIL', 'PREVIEW_WORKER_EXITED' if name == 'preview' else 'WORKER_EXITED')
+                preview_attempt = options['preview'] and (name.startswith('preview') or captured)
+                return failure('PREVIEW_WORKER_EXITED' if preview_attempt else 'WORKER_EXITED')
+            timestamp = message['time'] if windows_backend and 'time' in message else time.monotonic()
+            if windows_backend and timestamp > deadline:
+                # The worker and parent use the same Windows monotonic clock.
+                # A late phase transition may not extend an expired deadline.
+                raise queue.Empty
+            if 'captured' in message:
+                captured = message['captured']
+            if 'preview_timing' in message:
+                preview_timing.update(message['preview_timing'])
+            if 'preview_step' in message:
+                preview_step = message['preview_step']
+            if 'preview_outcome' in message:
+                preview_outcome = message['preview_outcome']
             if 'phase' in message and message['phase'] != name:
                 name = message['phase']
-                deadline = min(hard_end, time.monotonic() + limits[name])
+                deadline = min(hard_end, timestamp + limits[name])
             if 'result' in message:
                 value = message['result']
     except KeyboardInterrupt:
-        return result('SKIP', 'USER_CANCELLED', worker_terminated=stop_worker(process))
+        terminated = stop_worker(process)
+        if captured:
+            return failure('USER_CANCELLED', worker_terminated=terminated) | {'status': 'SKIP'}
+        return result('SKIP', 'USER_CANCELLED', worker_terminated=terminated)
     except (queue.Empty, subprocess.TimeoutExpired):
-        return result('FAIL', name.upper() + '_TIMEOUT', worker_terminated=stop_worker(process))
+        return failure(name.upper() + '_TIMEOUT', worker_terminated=stop_worker(process))
     except BaseException:
         stop_worker(process)
         raise
@@ -301,14 +446,22 @@ def identify_linux(target, options, budget=None):
 def discover(options):
     targets = range(options['probe_limit']) if WINDOWS else linux_nodes()
     devices = []
+    enumeration_timeout = None
     end = time.monotonic() + DISCOVERY_SECONDS
     if WINDOWS:
-        value = run_worker('enumerate', None, options, DISCOVERY_SECONDS)
-        if value['reason'] == 'ENUMERATED':
+        # Reserve part of the aggregate budget for index probes even if the
+        # native list operation stalls.
+        value = run_worker('enumerate', None, options, DISCOVERY_SECONDS / 2)
+        if value['reason'] == 'ENUMERATED' and value['devices']:
             names = {index: name for index, name in value['devices']}
             return [Device(index, names[index]) for index in sorted(names)], None
-        if value['reason'] != 'ENUMERATION_UNAVAILABLE':
+        if value['reason'] == 'ENUMERATE_TIMEOUT' and not value.get('worker_terminated'):
             return [], value
+        if value['reason'] not in ('ENUMERATED', 'ENUMERATION_EMPTY',
+                                   'ENUMERATION_UNAVAILABLE', 'ENUMERATE_TIMEOUT'):
+            return [], value
+        if value['reason'] == 'ENUMERATE_TIMEOUT':
+            enumeration_timeout = value
     for target in targets:
         remaining = end - time.monotonic()
         if remaining <= 0:
@@ -321,12 +474,14 @@ def discover(options):
             if value['reason'] in ('BACKEND_UNAVAILABLE', 'USER_CANCELLED'):
                 return devices, value
             devices.append(Device(target, precheck=None if value['status'] == 'CANDIDATE' else value))
+            if value.get('worker_terminated') is False:
+                return devices, result('SKIP', 'DISCOVERY_INCOMPLETE')
         else:
             device = identify_linux(target, options, remaining)
             if device.precheck and device.precheck['reason'] == 'USER_CANCELLED':
                 return devices, device.precheck
             devices.append(device)
-    return devices, None
+    return devices, None if devices else enumeration_timeout
 
 
 def test_device(device, options):
@@ -400,9 +555,14 @@ def main():
     preview.add_argument('--no-preview', dest='preview', action='store_false')
     parser.set_defaults(preview=None)
     parser.add_argument('--frames', type=bounded(2, 120, int), default=3)
-    parser.add_argument('--open-timeout', type=bounded(0.5, 30, float), default=4)
+    parser.add_argument('--open-timeout', type=bounded(0.5, 30, float), default=4,
+                        help='Seconds for device open (Windows: also for native enumeration; startup is separate).')
     parser.add_argument('--capture-timeout', type=bounded(0.5, 60, float), default=4)
     parser.add_argument('--preview-seconds', type=bounded(1, 60, float), default=5)
+    if WINDOWS:
+        parser.add_argument('--preview-init-timeout', type=bounded(0.5, 30, float),
+                            default=WINDOWS_PREVIEW_INIT_SECONDS,
+                            help='Seconds allowed for initial preview window, image and GUI events.')
     parser.add_argument('--probe-limit', type=bounded(1, 100, int), default=16, help='Windows: upper bound on indexes to probe.')
     parser.add_argument('--json', action='store_true', help='Write redacted result JSON to stdout.')
     args = parser.parse_args()
@@ -444,7 +604,13 @@ def main():
         if args.list:
             show_devices(devices, output=sys.stdout)
         for row in ([] if args.list else rows):
-            resolution = f", {row['width']}x{row['height']}, {row['frames']} consecutive frames, {row['preview']}" if 'width' in row else ''
+            resolution = f", {row['width']}x{row['height']}, {row['frames']} consecutive frames" if 'width' in row else ''
+            if row.get('preview') and row['preview'] != row['reason']:
+                resolution += f", {row['preview']}"
+            if row.get('preview_step'):
+                resolution += f", last preview step: {row['preview_step']}"
+            if row.get('capture_status') == 'PASS' and row['status'] != 'PASS':
+                resolution += ', capture passed'
             cleanup = f", worker terminated: {row['worker_terminated']}" if 'worker_terminated' in row else ''
             print(f"{row['device']} [{BACKEND}]: {row['status']} ({row['reason']}{resolution}{cleanup})")
         if diagnostic:

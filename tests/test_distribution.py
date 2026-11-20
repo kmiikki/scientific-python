@@ -28,24 +28,28 @@ class DistributionTests(unittest.TestCase):
             subprocess.run([sys.executable, '-B', str(ROOT / 'tools/build_distributions.py'), directory],
                            check=True, capture_output=True, text=True, timeout=45)
             for platform, launcher in [('linux', '07-test-usb-camera.sh'), ('windows', '07-TEST-USB-CAMERA.cmd')]:
-                name = f'scientific-python-v0.9.1-{platform}'
+                name = f'scientific-python-v0.9.2-{platform}'
                 with ZipFile(temp / (name + '.zip')) as archive:
                     self.assertIsNone(archive.testzip())
                     self.assertIn(f'{name}/{platform}/{launcher}', archive.namelist())
                     self.assertIn(f'{name}/shared/science-camera.py', archive.namelist())
+                    if platform == 'windows':
+                        self.assertIn(f'{name}/windows/10-remove-micromamba-executable.ps1', archive.namelist())
                     archive.extractall(temp)
                 bundle = temp / name / platform
                 meta = json.loads((bundle / 'science-installer-release.json').read_text())
-                self.assertEqual(meta['InstallerVersion'], '0.9.1')
+                self.assertEqual(meta['InstallerVersion'], '0.9.2')
                 for line in (bundle / 'SHA256SUMS.txt').read_text().splitlines():
                     digest, entry = line.split('  ', 1)
                     path = (bundle.parent if entry.startswith('shared/') else bundle) / entry
                     self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), digest, entry)
             if os.name == 'posix':
-                menu = temp / 'scientific-python-v0.9.1-linux/linux/00-menu.sh'
+                menu = temp / 'scientific-python-v0.9.2-linux/linux/00-menu.sh'
                 run = subprocess.run(['bash', menu], input='q\n', capture_output=True, text=True, timeout=20)
                 self.assertEqual(run.returncode, 0, run.stderr)
-                self.assertIn('Scientific Python 0.9.1', run.stdout)
+                header = 'Scientific Python 0.9.2 (Ubuntu LTS)'
+                self.assertEqual(run.stdout.splitlines()[1:5],
+                                 [header, '=' * len(header), '', '1  Install/update Scientific Python'])
                 self.assertIn('U  USB Camera Test (optional)', run.stdout)
 
     @unittest.skipUnless(os.name == 'posix', 'Ubuntu launcher targets a POSIX environment')
@@ -79,7 +83,7 @@ class DistributionTests(unittest.TestCase):
             path = Path(directory) / 'science-release.json'
             path.write_bytes(existing)
             value = config.effective(ROOT / 'linux', path)
-            self.assertEqual(value['InstallerVersion'], '0.9.1')
+            self.assertEqual(value['InstallerVersion'], '0.9.2')
             self.assertEqual(value['ScientificPackages'], package_config['ScientificPackages'])
             self.assertEqual(path.read_bytes(), existing)
             self.assertEqual(value['SchemaVersion'], 1)

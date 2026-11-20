@@ -12,25 +12,33 @@ $ErrorActionPreference='Stop'
 try{
     if(-not (Test-ScienceInteractiveConfiguration)){throw 'Whole-root removal requires an interactive console.'}
     $inventory=Get-ScienceCleanupInventory $ScienceRelease.MicromambaSha256
-    if(-not $inventory.Roots.Count){Write-Host 'No Micromamba roots detected.';exit 0}
+    if(-not $inventory.Roots.Count){Write-Host 'No Micromamba directories detected.';exit 0}
     $selection=Select-ScienceTotalRoot $inventory
     if(-not $selection){Write-Host 'Cancelled. Nothing was removed.';exit 0}
     $row=$selection.Row
     $plan=Get-ScienceTotalRemovalPlan $row $inventory $ScienceRelease.MicromambaSha256
-    Write-Host "DELETE root and private cache: $($plan.Root)"
-    Write-Host "DELETE executable: $($row.Layout.Micromamba)"
-    foreach($name in $plan.Environments){Write-Host "DELETE environment: $name"}
-    foreach($path in $plan.External.Keys){Write-Host "DELETE verified integration file: $path"}
-    foreach($name in $plan.Integration.Keys){Write-Host "CLEAN UP matching setting: $name"}
-    foreach($path in $plan.RemoveRegistrations){Write-Host "REMOVE registration: $path"}
-    Write-Host 'PRESERVE other roots, external environments, shared settings and package requests.'
+    Write-Host 'Selected Micromamba directory:'
+    Write-Host $plan.Root
+    Write-Host ''
+    Write-Host 'This will permanently delete:'
+    Write-Host ''
+    Write-Host '- All environments in this directory'
+    Write-Host '- Package caches'
+    Write-Host '- All other files, including user files'
+    Write-Host ''
+    Write-Host 'The selected directory and its entire contents will be deleted.'
+    if(-not (Test-PathWithin $row.Layout.Micromamba $plan.Root)){
+        Write-Host "Micromamba executable outside the selected directory will be preserved: $($row.Layout.Micromamba)"
+    }
+    foreach($name in $plan.Integration.Keys){Write-Host "Clear directory setting: $name"}
+    foreach($path in $plan.RemoveRegistrations){Write-Host "Remove environment registration: $path"}
     if(-not (Test-ScienceRemovalConfirmations $plan.Root $selection.IsDefault)){Write-Host 'Cancelled. Nothing was removed.';exit 0}
     $report=Invoke-ScienceTotalRemoval $plan {
         $now=Get-ScienceCleanupInventory $ScienceRelease.MicromambaSha256
         $selected=@($now.Roots|Where-Object {$_.Root -ceq $plan.Root})
-        if($selected.Count -ne 1){throw 'The selected root changed or is no longer detected.'}
+        if($selected.Count -ne 1){throw 'The selected directory changed or is no longer detected.'}
         Get-ScienceTotalRemovalPlan $selected[0] $now $ScienceRelease.MicromambaSha256
     }
     $report|ConvertTo-Json -Depth 8
     if($report.Status -ne 'SUCCESS'){exit 2}
-}catch{Write-Host ('Whole-root removal stopped: '+$_.Exception.Message) -ForegroundColor Yellow;exit 2}
+}catch{Write-Host ('Total Remove stopped: '+$_.Exception.Message) -ForegroundColor Yellow;exit 2}

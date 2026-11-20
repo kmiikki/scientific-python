@@ -1,6 +1,18 @@
 # Changelog
 
+## v0.9.2 development
+
+- Show a consistent platform heading on the main menu and installation screens. Show the Ubuntu Current / Target summary once before Micromamba validation.
+- Offer No PyTorch, CPU and NVIDIA CUDA during fresh installation. Check GPU and driver compatibility only for CUDA requests.
+- Use one elapsed-time clock for the approved package phase, including archive preparation, Micromamba execution and installer verification.
+- Clarify the separate removal actions and normal cancellation messages. Scope the Ubuntu Science preservation check to sibling environment entries and shared resource boundaries.
+- Record Ubuntu 24.04 LTS fresh installation, CUDA computation, Science removal, USB camera and installation progress acceptance. Native Windows 11 installer acceptance remains pending.
+
 ## v0.9.1 development
+
+- Give the first Windows camera preview its own HighGUI initialization deadline, and preserve validated frames if preview or cleanup fails.
+
+- Windows camera discovery tries bounded DirectShow index probes when native enumeration is empty. Worker startup has a separate timeout from device opening.
 
 - Add the optional USB Camera Test to both installer menus and standalone launchers. Select one camera or test multiple devices independently using DirectShow on Windows and V4L2 on Ubuntu.
 - Classify unsupported V4L2 nodes, validate consecutive frames in bounded workers, and optionally show live preview. Include redacted JSON results for unattended checks.
@@ -13,9 +25,9 @@
 - Resume Windows finalization from matching approved package identities and require a matching prefix ownership marker for removal.
 - Check Ubuntu Science environment ownership independently of the Micromamba root.
 - Add optional PyTorch CPU/CUDA selection to both installer menus, with configuration backups and runtime backend checks.
-- Verify the NVIDIA driver and GPU capability when solving CUDA packages. Document native Niobium acceptance for the existing-environment update, Spyder and PyTorch CUDA computation.
+- Verify the NVIDIA driver and GPU capability when solving CUDA packages. Document native Ubuntu 24.04 LTS acceptance for the existing-environment update, Spyder and PyTorch CUDA computation.
 
-## 0.1.0 Development Release — preparation, 2026-11-17
+## 0.1.0 Development Release — preparation
 
 ### Added
 

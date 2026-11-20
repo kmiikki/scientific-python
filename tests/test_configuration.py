@@ -77,6 +77,18 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(config.ConfigError,'matching original configuration'):
             config.initialize(ROOT/'linux',root=unknown,path=active)
         self.assertEqual(active.read_bytes(),original);self.assertEqual(marker.read_text(),'keep')
+    def test_edited_active_configuration_can_be_associated_with_legacy_root(self):
+        active = self.work/'config/science-release.json'
+        value = config.initialize(ROOT/'linux', path=active)
+        value['ScientificPackages'].append("pytorch[build='cpu*']")
+        original = json.dumps(value).encode()
+        active.write_bytes(original)
+        root = self.work/'legacy'; (root/'envs/science').mkdir(parents=True)
+        requests = config.initialize(ROOT/'linux', root=root, path=active, reviewer=lambda _: 'yes')
+        self.assertEqual(requests, value)
+        self.assertEqual(active.read_bytes(), original)
+        self.assertEqual(config.initialize(ROOT/'linux', root=root, path=active), value)
+
     def test_clean_initialization(self):
         active=self.work/'config/science-release.json'
         self.assertEqual(len(config.initialize(ROOT/'linux',root=self.work/'new-root',path=active)['ScientificPackages']),42)

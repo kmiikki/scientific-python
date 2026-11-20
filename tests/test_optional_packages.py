@@ -1,11 +1,12 @@
 """Exercise the Ubuntu optional-package menu without touching a user environment."""
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -30,11 +31,11 @@ class OptionalPackageTests(unittest.TestCase):
         self.path = config.active_path()
         self.defaults = config.initialize(BUNDLE)
 
-    def menu(self, *answers, cuda=False):
+    def menu(self, *answers, cuda=False, fresh=False):
         output = []
         reader = iter(answers)
         with patch.object(manager, 'has_nvidia_device', return_value=cuda):
-            install = installer.select_optional_packages(lambda _: next(reader), output.append)
+            install = installer.select_optional_packages(lambda _: next(reader), output.append, fresh=fresh)
         return install, '\n'.join(output)
 
     def test_cpu_saves_exact_backup_and_repeated_selection_is_read_only(self):
@@ -42,8 +43,7 @@ class OptionalPackageTests(unittest.TestCase):
         install, output = self.menu('1')
         self.assertTrue(install)
         self.assertIn('Configured PyTorch backend: NONE', output)
-        self.assertIn('PyTorch CPU selected.', output)
-        self.assertIn('Proposed package changes require separate approval.', output)
+        self.assertTrue(output.endswith('PyTorch CPU selected.'))
         self.assertEqual(config.read_json(self.path)['ScientificPackages'],
                          self.defaults['ScientificPackages'] + ["pytorch[build='cpu*']"])
         backup, = self.path.parent.glob('science-release.optional-*.json')
@@ -73,6 +73,18 @@ class OptionalPackageTests(unittest.TestCase):
         self.assertFalse(install)
         self.assertIn('CUDA requires a working NVIDIA driver', output)
         self.assertEqual(self.path.read_bytes(), before)
+
+    def test_cuda_device_probe_runs_after_selection(self):
+        output = []
+        with patch.object(manager, 'has_nvidia_device', return_value=True) as probe:
+            def choose_cuda(_):
+                probe.assert_not_called()
+                self.assertFalse(any(line.startswith('NVIDIA CUDA device') for line in output))
+                return '2'
+
+            self.assertTrue(installer.select_optional_packages(choose_cuda, output.append, fresh=True))
+            probe.assert_called_once_with()
+        self.assertTrue(any(line.startswith('NVIDIA CUDA device detected.') for line in output))
 
     def test_removal_preserves_other_requests_and_does_not_start_install(self):
         value = self.defaults
@@ -104,6 +116,139 @@ class OptionalPackageTests(unittest.TestCase):
                                 capture_output=True, text=True, check=True)
         self.assertIn('O  Configure optional packages and install/update', result.stdout)
         self.assertIn('Optional package selection requires an interactive terminal', result.stderr)
+
+    def run_install(self, root, answers, runner, *, cuda=False, preflight=None):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        binary = root / 'bin/micromamba'
+        settings = {'driver': '13.2', 'architecture': '12.0', 'runtime_limit': '13.3',
+                    'overrides': {}, 'minor_limit': None}
+        ask = installer.ask
+        with ExitStack() as stack:
+            for boundary in (
+                redirect_stdout(stdout), redirect_stderr(stderr),
+                patch.object(sys.stdin, 'isatty', return_value=True),
+                patch.object(stdout, 'isatty', return_value=True),
+                patch.object(sys, 'argv', ['science-install.py', 'install']),
+                patch.object(Path, 'home', return_value=self.work),
+                patch('builtins.input', side_effect=answers),
+                patch.object(installer, 'ask', side_effect=lambda prompt, default=None, reader=None:
+                             ask(prompt, default, reader or input)),
+                patch.object(manager, 'platform_guard'),
+                patch.object(installer, 'detect', return_value={'prior': []}),
+                patch.object(installer, 'select', return_value=('Existing', root, binary)),
+                patch.object(installer, 'ensure_micromamba', return_value=(binary, '2.10.0')),
+                patch.object(installer, 'preflight', side_effect=preflight), patch.object(installer, 'summary'),
+                patch.object(installer, 'diagnostics'), patch.object(installer, 'recheck_usage', return_value=True),
+                patch.object(installer, 'logged_runner', side_effect=runner),
+                patch.object(manager, 'using_science', return_value=False),
+            ):
+                stack.enter_context(boundary)
+            probe = stack.enter_context(patch.object(manager, 'has_nvidia_device', return_value=cuda))
+            compatibility = stack.enter_context(patch.object(manager, 'cuda_solver_settings', return_value=settings))
+            code = installer.main()
+        return code, stdout.getvalue(), stderr.getvalue(), probe, compatibility
+
+    def test_fresh_install_choices_agree_with_configuration_and_package_plan_preview(self):
+        stale = self.defaults | {'ScientificPackages': self.defaults['ScientificPackages'] + ["pytorch[build='cuda*']"]}
+        backup = self.path.with_suffix('.json.backup-timestamp')
+        backup.write_text(json.dumps(stale))
+        for answer, backend, build, label in [
+            ('', 'none', None, 'No PyTorch selected.'),
+            ('1', 'cpu', 'cpu_mkl_py314_0', 'PyTorch CPU selected.'),
+            ('2', 'cuda', 'cuda129_fixture', 'PyTorch CUDA selected.'),
+        ]:
+            with self.subTest(backend=backend):
+                self.path.unlink(missing_ok=True)
+                root = self.work / backend
+                support = root / 'share/scientific-python'
+                support.mkdir(parents=True)
+                snapshot = support / 'science-release.json'
+                snapshot.write_bytes(backup.read_bytes())
+                records = self.fixture_plan(build) if build else config.read_json(
+                    ROOT / 'shared/fixtures/approved-linux-records.json')
+                if backend == 'cuda':
+                    records += [
+                        {'name': 'cuda-version', 'version': '12.9', 'build': 'fixture',
+                         'subdir': 'noarch', 'sha256': 'a' * 64},
+                        {'name': 'cuda-arch', 'version': '7.5', 'build': 'fixture',
+                         'subdir': 'noarch', 'sha256': 'b' * 64},
+                    ]
+                requested = self.defaults['ScientificPackages'] + ([f"pytorch[build='{backend}*']"] if build else [])
+                solved = []
+
+                def runner(argv, **_):
+                    self.assertEqual(argv[1], 'create')
+                    self.assertIn('--dry-run', argv)
+                    self.assertEqual([item for item in argv if str(item).startswith('pytorch')], [f"pytorch[build='{backend}*']"] if build else [])
+                    self.assertEqual(config.read_json(self.path)['ScientificPackages'], requested)
+                    solved.append(backend)
+                    plan = {'success': True, 'actions': {'LINK': records}}
+                    return subprocess.CompletedProcess(argv, 0, json.dumps(plan), '')
+
+                # Select the backend, skip the desktop shortcut, then decline package changes.
+                code, output, errors, probe, compatibility = self.run_install(
+                    root, [answer, 'n', 'n'], runner, cuda=True)
+                if backend == 'cuda':
+                    probe.assert_called_once_with()
+                    compatibility.assert_called_once()
+                else:
+                    probe.assert_not_called()
+                    compatibility.assert_not_called()
+                    self.assertNotIn('NVIDIA CUDA device', output)
+                self.assertEqual(code, 1)
+                self.assertEqual(solved, [backend])
+                self.assertIn('0  No PyTorch (default)', output)
+                self.assertIn(label, output)
+                self.assertIn('not approved', errors)
+                plan = config.read_json(root / '.science-update-plan.json')
+                torch = [item['build'] for item in plan['changes']['LINK'] if item['name'] == 'pytorch']
+                self.assertEqual(torch, [build] if build else [])
+                self.assertFalse((root / 'envs/science').exists())
+                self.assertEqual(snapshot.read_bytes(), backup.read_bytes())
+
+    def test_fresh_default_clears_saved_cuda_and_keeps_other_requests(self):
+        self.assertTrue(self.menu('2', cuda=True)[0])
+        value = config.read_json(self.path)
+        value['ScientificPackages'].append('pytest')
+        self.path.write_text(json.dumps(value))
+        original = self.path.read_bytes()
+        proceed, output = self.menu('2', '', fresh=True)
+        self.assertTrue(proceed)
+        self.assertIn('CUDA requires a working NVIDIA driver', output)
+        self.assertTrue(output.endswith('No PyTorch selected.'))
+        self.assertEqual(config.read_json(self.path)['ScientificPackages'], self.defaults['ScientificPackages'] + ['pytest'])
+        self.assertTrue(any(path.read_bytes() == original for path in self.path.parent.glob('science-release.optional-*.json')))
+
+    def test_update_keeps_active_requests_and_recovers_snapshot_only_if_missing(self):
+        root = self.work / 'existing'
+        (root / 'envs/science').mkdir(parents=True)
+        support = root / 'share/scientific-python'
+        support.mkdir(parents=True)
+        snapshot = support / 'science-release.json'
+        snapshot.write_text(json.dumps(self.defaults | {
+            'ScientificPackages': self.defaults['ScientificPackages'] + ["pytorch[build='cuda*']"]}))
+        self.path.unlink()
+        recovered = config.initialize(BUNDLE, root=root)
+        self.assertEqual(config.pytorch_backend(recovered['ScientificPackages']), 'cuda')
+        self.assertTrue(self.menu('1')[0])
+        original = self.path.read_bytes()
+        with patch.object(manager, 'owned_science', return_value=True):
+            with self.assertRaisesRegex(RuntimeError, 'Reached update'):
+                self.run_install(root, ['n'], lambda *_: self.fail('Unexpected solver invocation'),
+                                 preflight=RuntimeError('Reached update'))
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual(config.pytorch_backend(config.effective(BUNDLE)['ScientificPackages']), 'cpu')
+
+    def test_fresh_solver_cannot_pull_in_unselected_pytorch(self):
+        root = self.work / 'fresh'
+        root.mkdir()
+        plan = {'success': True, 'actions': {'LINK': self.fixture_plan('cuda129_fixture')}}
+        runner = lambda argv, **_: subprocess.CompletedProcess(argv, 0, json.dumps(plan), '')
+        with redirect_stdout(io.StringIO()), patch.object(manager, 'using_science', return_value=False):
+            with self.assertRaisesRegex(manager.InstallError, 'includes PyTorch as a dependency'):
+                manager.sync(root, config.effective(BUNDLE), runner=runner, existing=True,
+                             reviewer=lambda *_: self.fail('Unexpected package approval'))
+        self.assertFalse((root / 'envs/science').exists())
 
     def fixture_plan(self, build):
         packages = config.read_json(ROOT / 'shared/fixtures/approved-linux-records.json')

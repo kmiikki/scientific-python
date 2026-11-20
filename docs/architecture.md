@@ -32,12 +32,12 @@ Each platform's `SHA256SUMS.txt` covers its scripts, resources, immutable `scien
 The existing menu/bootstrap/layout/launcher/removal structure is retained. `science-update.ps1` performs the initial solve using configured channels and release policy; `science-transaction.ps1` seals and executes the approved package identities.
 
 1. Read installed records, reject duplicates, validate the root/prefix and exclude active Science processes. Acquire an exclusive installer update lock.
-2. Resolve before approval. Validate required requests, Python 3.14 ordinary GIL, Spyder 6.1.8, CPU Arrow, OpenCV 5.x Qt6 and FFmpeg 9.x GPL, including media no-downgrade floors. Refuse removal of installed names without replacements.
+2. Resolve before approval. Validate required requests, Python 3.14 ordinary GIL, Spyder 6.1.8, CPU Arrow, OpenCV 5.x Qt6 and FFmpeg 9.x GPL, including media no-downgrade floors. Protect direct, pinned and required packages. Eligible obsolete dependencies require separate approval.
 3. Freeze the before/after universe, approved LINK/UNLINK records, target prefix, installed-metadata digest, active-configuration hash and executable hash. Show actions and bind approval to the serialized lock SHA256.
 4. Copy a matching archive from the package cache, or download its approved HTTPS URL. Verify SHA256. Stage approved LINK archives in a private transaction directory; the normal package cache is a read source.
 5. Generate an `@EXPLICIT` file with local file URLs and SHA256 fragments. Generate a local channel containing exactly the final approved records and a full exact-spec environment input. Seal these inputs.
 6. Use Micromamba `create --download-only --offline --file …` to extract the approved archives into a private cache. Compare its reported identities.
-7. For a new environment, use explicit `create`. For an update, use `env update --prune --offline --file …` against the frozen local universe. This uses Micromamba's solver, with no alternative versions or builds available. The complete retained universe prevents pruning independent user packages.
+7. For a new environment, use explicit `create`. An ordinary update uses `env update --prune --offline --file …`. Updates with separately approved dependency removals use `update --all` against the frozen local universe. Repairs must relink the same approved identities.
 8. Run a native dry run and compare both LINK and UNLINK identities (name, version, build, subdir, SHA256) with the approved plan. Recheck lock, inputs, archives, configuration, binary and installed metadata before commit. Apply the narrowly approved legacy GTK hook guard immediately before native execution.
 9. Commit the same frozen command offline, compare the reported event and installed final identities, restore original source/dependency metadata and validate the GTK cache. Never claim automatic rollback.
 
@@ -52,6 +52,12 @@ The phase-1/2 Windows execution gates are replaced by this checked path. Calling
 The existing V4-r5.2 implementation remains: guarded roots/ownership, process checks, approved frozen transactions, bootstrap receipts, package/media verification, managed launchers and narrowly scoped removal. Release preparation fixes the preflight display's positional assumption about media requests and updates development-version metadata. The Spyder follow-up also resolves file-loaded project dependencies explicitly relative to their bundle, without modifying global import paths; see the [startup fix](spyder-startup-fix.md).
 
 Read-only review checked menu dispatch, JSON loading, immutable manifests, bootstrap verification, transaction identity checks, launcher creation and removal boundaries. Isolated tests cover the changed preview and existing configuration/safety boundaries. No production environment was altered to establish readiness.
+
+## Progress and removal boundaries
+
+After package approval, Ubuntu and Windows start one monotonic clock for the entire package phase. Progress appears approximately every five seconds and distinguishes Micromamba from installer-side preparation, output processing and verification. The monitor stops on success or error. Ubuntu records progress lines in the installation log.
+
+Ubuntu Science-only removal still checks the selected tree and approved launcher targets. Its preservation comparison records directory identities, neighboring environment entries, top-level cache entries and unmanaged root files, along with Bash settings metadata, the Micromamba hash and retained Conda registrations. Whole-directory removal uses its own approved snapshot and guards. See the [Ubuntu guide](ubuntu-installation.md#3--remove-science-environment) and [Windows guide](windows-installation.md#5--remove-science-environment).
 
 ## Release-default configuration additions
 

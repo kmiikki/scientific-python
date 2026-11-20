@@ -6,6 +6,14 @@ Assert-ScienceBundle $PSScriptRoot
 
 $script:ScientificPythonEnvName = 'science'
 
+function Write-ScienceInstallerHeading {
+    param([string]$InstallerVersion)
+
+    $header = "Scientific Python $InstallerVersion (Windows 11)"
+    Write-Host $header
+    Write-Host ('=' * $header.Length)
+}
+
 function Get-ScienceSidInfo {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $sid = $identity.User.Value
@@ -281,7 +289,7 @@ function Select-ScienceRemovalRoot {
     if(-not (Test-ScienceInteractiveConfiguration)){throw 'Removal selection requires an interactive console.'}
     $rows=@(Get-ScienceMicromambaInventory $ExpectedSha256)
     if($ScienceOnly){$rows=@($rows|Where-Object {$_.Environments -contains 'science'})}
-    if(-not $rows.Count){Write-Host 'No supported removal root was found.';return $null}
+    if(-not $rows.Count){Write-Host 'No supported Micromamba directory was found.';return $null}
     $science=@($rows|Where-Object {$_.VerifiedExecutable -and $_.Environments -contains 'science'})
     $active=@($science|Where-Object {$env:CONDA_PREFIX -ieq $_.Layout.Science})
     $default=if($active.Count -eq 1){$active[0]}elseif($science.Count -eq 1 -and @($rows|Where-Object {$_.Environments -contains 'science'}).Count -eq 1){$science[0]}
@@ -292,12 +300,12 @@ function Select-ScienceRemovalRoot {
         if($default -and $row.Root -ceq $default.Root){$number=$i+1}
     }
     Write-Host '[0] Cancel'
-    $answer=(Read-Host "Select removal root [$number]").Trim()
+    $answer=(Read-Host "Select Micromamba directory [$number]").Trim()
     if(-not $answer){$answer=[string]$number}
     if($answer -eq '0'){return $null}
     if($answer -notmatch '^[1-9][0-9]?$' -or [int]$answer -gt $rows.Count){throw 'Invalid root selection.'}
     $selected=$rows[([int]$answer)-1]
-    if([int]$answer -ne $number -and (Read-Host "Type the exact root path $($selected.Root)") -cne $selected.Root){throw 'Root path did not match exactly; no removal was started.'}
+    if([int]$answer -ne $number -and (Read-Host "Type the exact directory path $($selected.Root)") -cne $selected.Root){throw 'The directory path did not match exactly. No removal was started.'}
     return $selected.Layout
 }
 
@@ -1340,20 +1348,46 @@ function Show-OtherInstallationSummary {
     Write-Host 'The setup does not scan the whole disk.'
 }
 
+function Assert-ScienceLayoutStateIdentity {
+    param($Layout,$State)
+    if($State -isnot [pscustomobject]){throw 'The saved installer state is not a JSON object.'}
+    foreach($field in @('root','micromamba','user_sid','layout_mode')){
+        $expected=switch($field){
+            root {$Layout.Root}
+            micromamba {$Layout.Micromamba}
+            user_sid {$Layout.Sid}
+            layout_mode {$Layout.Mode}
+        }
+        if($State.$field -and ($State.$field -isnot [string] -or
+            ($expected -and $State.$field -ine $expected))){
+            throw "The saved installer state identifies a different $field."
+        }
+    }
+}
+
 function Read-ScienceState {
     param(
         [Parameter(Mandatory=$true)]
-        $Layout
+        $Layout,
+        [switch]$Strict
     )
 
-    if (-not (Test-Path -LiteralPath $Layout.State -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $Layout.State)) {
         return $null
     }
 
     try {
-        return (Get-Content -LiteralPath $Layout.State -Raw | ConvertFrom-Json)
+        if($Strict){
+            Assert-ScienceRegularPath $Layout.State
+            if(([IO.FileInfo]::new($Layout.State)).Length -gt 1MB){throw 'The saved installer state is too large.'}
+            $state=Read-ScienceJson $Layout.State
+            Assert-ScienceLayoutStateIdentity $Layout $state
+            return $state
+        }
+        return (Get-Content -LiteralPath $Layout.State -Raw | ConvertFrom-Json -ErrorAction Stop)
     }
     catch {
+        if($Strict){throw}
         return $null
     }
 }

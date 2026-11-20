@@ -25,7 +25,9 @@ GitHub’s **Code → Download ZIP** downloads `scientific-python-main.zip` from
 
 ## Versioned installer archives
 
-From the verified source checkout on Ubuntu, run `python3 -B tools/build_distributions.py OUTPUT_DIRECTORY`. The builder checks both platform version declarations and the source and platform manifests. For v0.9.1 it produces `scientific-python-v0.9.1-linux.zip` and `scientific-python-v0.9.1-windows.zip`. Each archive contains its installer folder and the matching `shared/` folder. Unpack the whole archive before using the installer.
+From the verified source checkout on Ubuntu, run `python3 -B tools/build_distributions.py OUTPUT_DIRECTORY`. The builder checks both platform version declarations and the source and platform manifests. For v0.9.2 it produces `scientific-python-v0.9.2-linux.zip` and `scientific-python-v0.9.2-windows.zip`. Each archive contains its installer directory and the matching `shared/` directory. Unpack the whole archive before using the installer.
+
+The [0.9.2 acceptance record](testing.md#v092-ubuntu-2404-lts-acceptance) lists the verified Ubuntu 24.04 LTS results, including the progress test. [Native Windows 11 / PowerShell 5.1 acceptance](testing.md#windows-11-native-acceptance-pending) remains pending.
 
 ## Milestones
 

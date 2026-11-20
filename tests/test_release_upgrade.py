@@ -125,7 +125,7 @@ class ReleaseUpgradeTests(unittest.TestCase):
         self.save(self.value(CASES[1]));config.offer_release_packages(ROOT/'linux',self.path,True,lambda _:'yes',lambda _:None)
         manager=load('upgrade_native_manager',ROOT/'linux/science-manager.py')
         effective=dict(config.read_json(ROOT/'linux/science-installer-release.json'),**config.read_json(self.path))
-        root=self.work/'native-root';other=root/'envs/py314-opencv5-cuda/KEEP';other.parent.mkdir(parents=True);other.write_text('unchanged')
+        root=self.work/'native-root';other=root/'envs/research-extras/KEEP';other.parent.mkdir(parents=True);other.write_text('unchanged')
         captured=[]
         class Captured(Exception):pass
         def runner(argv,**kwargs):captured.extend(argv);raise Captured()

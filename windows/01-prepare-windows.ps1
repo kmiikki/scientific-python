@@ -61,9 +61,22 @@ catch {
     Stop-Setup $_.Exception.Message
 }
 
+try {
+    . (Join-Path $PSScriptRoot 'science-config.ps1')
+    . (Join-Path $PSScriptRoot 'science-transaction.ps1')
+    $installerPolicy = Read-ScienceJson (Join-Path $PSScriptRoot 'science-installer-release.json')
+    foreach($target in @($layout.Root,$layout.Science,$layout.Micromamba,$layout.State)){
+        Assert-ScienceTransactionPath $target
+    }
+    $state = Read-ScienceState -Layout $layout -Strict
+} catch {
+    Stop-Setup $_.Exception.Message
+}
+
 Write-Host ''
-Write-Host 'Scientific Python - Windows preparation'
-Write-Host '======================================='
+Write-ScienceInstallerHeading $installerPolicy.InstallerVersion
+Write-Host ''
+Write-Host 'Windows preparation'
 Write-Host ''
 Write-Host "Mode             : $($layout.Mode)"
 Write-Host "Windows user SID : $($layout.Sid)"
@@ -227,8 +240,6 @@ catch {
     Stop-Setup "The normal user cannot write to $($layout.Root): $($_.Exception.Message)"
 }
 
-$state = Read-ScienceState -Layout $layout
-
 if (-not $state) {
     $state = [pscustomobject][ordered]@{
         schema_version = 2
@@ -252,6 +263,8 @@ if (-not $state) {
 else {
     $state | Add-Member -NotePropertyName schema_version -NotePropertyValue 2 -Force
     $state | Add-Member -NotePropertyName layout_mode -NotePropertyValue $layout.Mode -Force
+    $state | Add-Member -NotePropertyName user_sid -NotePropertyValue $layout.Sid -Force
+    $state | Add-Member -NotePropertyName user_id -NotePropertyValue $layout.UserId -Force
     $state | Add-Member -NotePropertyName root -NotePropertyValue $layout.Root -Force
     $state | Add-Member -NotePropertyName micromamba -NotePropertyValue $layout.Micromamba -Force
 

@@ -345,7 +345,7 @@ function ConvertFrom-ScienceTransactionJson {
     return $value
 }
 function Invoke-ScienceLockedTransaction {
-    param($Layout,$Lock,[string]$Directory,[string]$ConfigPath,[string]$ExpectedLockDigest,[scriptblock]$BeforeCommit={},[hashtable]$CudaOverrides=@{})
+    param($Layout,$Lock,[string]$Directory,[string]$ConfigPath,[string]$ExpectedLockDigest,[scriptblock]$BeforeCommit={},[hashtable]$CudaOverrides=@{},$PackageProgress)
     if($ExpectedLockDigest -cnotmatch '^[0-9a-f]{64}$' -or (Get-ScienceTextDigest ($Lock|ConvertTo-Json -Depth 64 -Compress)) -cne $ExpectedLockDigest){throw 'Approved identity changed before execution.'}
     if([IO.Path]::GetFullPath($Layout.Science) -cne [IO.Path]::GetFullPath($Lock.prefix)){throw 'Execution target differs from approved prefix.'}
     $finalNames=@($Lock.after|ForEach-Object {$_.name})
@@ -356,7 +356,9 @@ function Invoke-ScienceLockedTransaction {
     Write-ScienceTransactionJson $lockPath $Lock
     $lockHash=Get-ScienceFileSha256 $lockPath
     $memoryHash=Get-ScienceTextDigest ($Lock|ConvertTo-Json -Depth 64 -Compress)
+    if($PackageProgress){$PackageProgress.SetActivity('PowerShell: staging and verifying approved archives')}
     Save-ScienceApprovedArchives $Lock $Directory $Layout.Pkgs
+    if($PackageProgress){$PackageProgress.SetActivity('PowerShell: preparing offline transaction inputs')}
     $inputs=New-ScienceLockedInputs $Lock $Directory
     $privateCache=Join-Path $Directory 'cache';[void][IO.Directory]::CreateDirectory($privateCache)
     $environment=@{MAMBA_ROOT_PREFIX=$Layout.Root;CONDA_PKGS_DIRS=$privateCache;CONDA_SUBDIR='win-64';TEMP=$Layout.Tmp;TMP=$Layout.Tmp;TMPDIR=$Layout.Tmp;MAMBA_SAFETY_CHECKS='enabled';MAMBA_EXTRA_SAFETY_CHECKS='true'}
@@ -371,8 +373,8 @@ function Invoke-ScienceLockedTransaction {
         Assert-ScienceTransactionPath $Layout.Science
         if((Get-SciencePrefixDigest $Layout.Science) -cne $Lock.prefix_files_sha256){throw 'Installed package metadata changed after approval.'}
     }
-    $execute={param([string[]]$Arguments,[string]$Phase)
-        $result=Invoke-ScienceNative $Layout.Micromamba $Arguments $environment
+    $execute={param([string[]]$Arguments,[string]$Phase,[string]$NativeActivity)
+        $result=Invoke-ScienceNative $Layout.Micromamba $Arguments $environment -PackageProgress $PackageProgress -NativeActivity $NativeActivity
         if($Phase -ceq 'Locked commit'){$verification.native_exit_code=$result.ExitCode;$verification.stage='save-native-diagnostics'}
         $nativeDirectory=Join-Path $Directory ('native-'+($Phase.ToLowerInvariant() -replace '[^a-z0-9]+','-'))
         try {$nativeEvidence=Save-ScienceMambaFailure $Layout $Arguments $result $Phase -Directory $nativeDirectory -SummaryName result.json}
@@ -389,7 +391,7 @@ function Invoke-ScienceLockedTransaction {
     & $guard
     $downloadPrefix=Join-Path $Directory 'download-prefix'
     $preload=@('create','--no-rc','-r',$Layout.Root,'-p',$downloadPrefix,'--offline','--no-pyc','--json','--file',$inputs.Explicit,'--download-only','-y')
-    $prepared=& $execute $preload 'Approved archive extraction'
+    $prepared=& $execute $preload 'Approved archive extraction' 'Micromamba: extracting approved archives'
     Assert-SciencePlanPrefix $prepared $downloadPrefix
     Assert-ScienceSameTransaction ([pscustomobject]@{actions=[pscustomobject]@{LINK=@($Lock.approved.actions.LINK);UNLINK=@()}}) $prepared 'Approved archive extraction'
     if(@($Lock.before).Count -eq 0){$command=@('create','--no-rc','-r',$Layout.Root,'-p',$Layout.Science,'--offline','--no-pyc','--json','--file',$inputs.Explicit)}
@@ -405,7 +407,7 @@ function Invoke-ScienceLockedTransaction {
         $command=@('update','--all','--no-rc','-r',$Layout.Root,'-p',$Layout.Science,'--offline','--json','--file',$inputs.Environment)
     }else{$command=@('env','update','--prune','--no-rc','-r',$Layout.Root,'-p',$Layout.Science,'--offline','--json','--file',$inputs.Environment)}
     & $guard
-    $preflight=& $execute ($command+@('--dry-run')) 'Locked preflight'
+    $preflight=& $execute ($command+@('--dry-run')) 'Locked preflight' 'Micromamba: checking offline transaction'
     Assert-SciencePlanPrefix $preflight $Layout.Science
     Assert-ScienceSameTransaction $Lock.approved $preflight 'Locked preflight'
     Write-ScienceTransactionJson (Join-Path $Directory 'locked-preflight.json') $preflight
@@ -414,7 +416,8 @@ function Invoke-ScienceLockedTransaction {
     & $guard
     $verification=[ordered]@{stage='native-commit';native_exit_code=$null;native_json_parsed=$false;native_reported_success=$null;completed=$false;committed_plan_written=$false;installed_identities_verified=$false;exception_type=$null}
     try {
-        $committed=& $execute ($command+@('-y')) 'Locked commit'
+        $committed=& $execute ($command+@('-y')) 'Locked commit' 'Micromamba: applying approved transaction'
+        if($PackageProgress){$PackageProgress.SetActivity('PowerShell: verifying installed packages and restoring metadata')}
         $verification.stage='reported-prefix'
         Assert-SciencePlanPrefix $committed $Layout.Science
         $verification.stage='approved-link-unlink-identities'

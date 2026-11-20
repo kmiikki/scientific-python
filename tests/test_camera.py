@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -83,6 +84,107 @@ class CameraTests(unittest.TestCase):
         self.assertIsNone(diagnostic)
         run.assert_called_once()
 
+    def test_directshow_empty_native_list_uses_bounded_probes_in_each_mode(self):
+        registry = Mock()
+        registry.enumerateDevices.return_value = []
+        registry.isBackendBuiltIn.return_value = True
+        cv = Mock(videoio_registry=registry)
+        cap = cv.VideoCapture.return_value
+        cap.open.side_effect = lambda index, _backend: index == 0
+        cap.read.return_value = True, SimpleNamespace(size=640 * 480 * 3, shape=(480, 640, 3))
+
+        def fake_worker(action, index, options, budget=None):
+            if action == 'enumerate':
+                return camera.enumerate_directshow(cv, 700)
+            return camera.capture_device(index, options, lambda _: None, cv, 700, probe=action == 'probe')
+
+        for args, code, actions, expected in [
+            (['--list', '--json'], 2, [('enumerate', None), ('probe', 0), ('probe', 1)], 'LIST_ONLY'),
+            (['--all', '--json'], 0, [('enumerate', None), ('probe', 0), ('probe', 1), ('test', 0)], 'VALID_FRAMES'),
+            ([], 0, [('enumerate', None), ('probe', 0), ('probe', 1), ('test', 0)], 'VALID_FRAMES'),
+            (['--device', '0', '--json'], 0, [('test', 0)], 'VALID_FRAMES'),
+            (['--device', '1', '--json'], 1, [('test', 1)], 'OPEN_FAILED'),
+        ]:
+            output = io.StringIO()
+            argv = ['camera', '--prefix', sys.prefix, '--probe-limit', '2', '--no-preview', *args]
+            with self.subTest(args=args), patch.object(camera, 'WINDOWS', True), \
+                 patch.object(camera, 'BACKEND', 'DirectShow'), patch.object(sys, 'argv', argv), \
+                 patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='1'), \
+                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()), \
+                 patch.object(camera, 'run_worker', side_effect=fake_worker) as run:
+                self.assertEqual(camera.main(), code)
+                self.assertEqual([call.args[:2] for call in run.call_args_list], actions)
+                if '--json' in args:
+                    report = json.loads(output.getvalue())
+                    self.assertIsNone(report['diagnostic'])
+                    row, = report['devices']
+                    self.assertEqual(row['device'], 'index 1' if expected == 'OPEN_FAILED' else 'index 0')
+                    self.assertEqual(row['reason'], expected)
+                    if expected == 'VALID_FRAMES':
+                        self.assertEqual((row['width'], row['height'], row['frames']), (640, 480, 3))
+                else:
+                    self.assertIn('index 0 [DirectShow]: PASS (VALID_FRAMES, 640x480', output.getvalue())
+
+    def test_directshow_enumeration_timeout_leaves_budget_for_fallback(self):
+        options = OPTIONS | {'probe_limit': 1}
+        timeout = camera.result('FAIL', 'ENUMERATE_TIMEOUT', worker_terminated=True)
+        with patch.object(camera, 'WINDOWS', True), patch.object(camera.time, 'monotonic', side_effect=[0, 15]):
+            with patch.object(camera, 'run_worker', side_effect=[timeout, camera.result('CANDIDATE', 'OPENED')]) as run:
+                devices, diagnostic = camera.discover(options)
+        self.assertEqual([call.args[-1] for call in run.call_args_list], [15, 15])
+        self.assertEqual([d.target for d in devices], [0])
+        self.assertIsNone(diagnostic)
+
+    def test_directshow_discovery_does_not_mask_unresolved_timeout_as_no_camera(self):
+        options = OPTIONS | {'probe_limit': 1}
+        for terminated in (False, True):
+            timeout = camera.result('FAIL', 'ENUMERATE_TIMEOUT', worker_terminated=terminated)
+            outcomes = [timeout, camera.result('FAIL', 'OPEN_FAILED')]
+            with self.subTest(terminated=terminated), patch.object(camera, 'WINDOWS', True), \
+                 patch.object(camera, 'run_worker', side_effect=outcomes) as run:
+                self.assertEqual(camera.discover(options), ([], timeout))
+                self.assertEqual(run.call_count, 2 if terminated else 1)
+
+    def test_windows_startup_does_not_consume_camera_open_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / 'phase.py'
+            script.write_text(
+                "import json, sys, time\n"
+                "action = json.loads(sys.argv[2])[0]\n"
+                "time.sleep(0.5)\n"
+                "print(json.dumps({'phase': 'enumerate' if action == 'enumerate' else 'open'}), flush=True)\n"
+                "if action != 'ready': time.sleep(60)\n"
+                "print(json.dumps({'result': {'status': 'CANDIDATE', 'reason': 'OPENED'}}), flush=True)\n",
+                encoding='ascii')
+            options = OPTIONS | {'open_timeout': 0.3}
+            with patch.object(camera, 'WINDOWS', True), patch.object(camera, '__file__', str(script)), \
+                 patch.object(subprocess, 'CREATE_NEW_PROCESS_GROUP',
+                              getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0), create=True):
+                self.assertEqual(camera.run_worker('ready', 0, options)['reason'], 'OPENED')
+                for action, reason in [('probe', 'OPEN_TIMEOUT'), ('enumerate', 'ENUMERATE_TIMEOUT')]:
+                    with self.subTest(action=action):
+                        self.assertEqual(camera.run_worker(action, 0, options),
+                                         camera.result('FAIL', reason, worker_terminated=True))
+                with patch.object(camera, 'WINDOWS_STARTUP_SECONDS', 0.2):
+                    self.assertEqual(camera.run_worker('probe', 0, options),
+                                     camera.result('FAIL', 'STARTUP_TIMEOUT', worker_terminated=True))
+
+    def test_windows_worker_announces_native_operation_after_backend_initialization(self):
+        registry = Mock()
+        registry.enumerateDevices.return_value = []
+        cv = Mock(videoio_registry=registry)
+        cv.VideoCapture.return_value.open.return_value = False
+        for action, phases in [('enumerate', ['enumerate']), ('probe', ['open', 'shutdown'])]:
+            with self.subTest(action=action), patch.object(camera, 'WINDOWS', True), \
+                 patch.object(camera, 'emit') as emit:
+                def initialize():
+                    emit.assert_not_called()
+                    return cv, 700
+                with patch.object(camera, 'open_cv', side_effect=initialize):
+                    camera.worker(action, 0, OPTIONS)
+                self.assertEqual([call.args[0]['phase'] for call in emit.call_args_list[:-1]], phases)
+                self.assertIn('result', emit.call_args_list[-1].args[0])
+
     def test_directshow_discovery_deadline(self):
         with patch.object(camera, 'WINDOWS', True), patch.object(camera.time, 'monotonic', side_effect=[0, 0, 31]):
             with patch.object(camera, 'run_worker', side_effect=[camera.result('SKIP', 'ENUMERATION_UNAVAILABLE'),
@@ -133,7 +235,7 @@ class CameraTests(unittest.TestCase):
 
     def test_v4l2_node_paths_and_aliases_are_deduplicated(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / 'video7').touch()
             (root / 'video2').touch()
             by_id = root / 'v4l/by-id'
@@ -181,9 +283,10 @@ class CameraTests(unittest.TestCase):
             cv.namedWindow.assert_not_called()
 
     def test_failed_preview_keeps_capture_result_and_releases_device(self):
-        with patch.object(camera, 'preview_frames', return_value='PREVIEW_UNAVAILABLE'):
+        with patch.object(camera, 'preview_windows', return_value=('PREVIEW_UNAVAILABLE', {'initialization': 0.1})):
             value, _ = self.capture([(True, FRAME)] * 3, OPTIONS | {'preview': True})
-        self.assertEqual((value['status'], value['preview']), ('PASS', 'PREVIEW_UNAVAILABLE'))
+        self.assertEqual((value['status'], value['capture_status'], value['frames'], value['preview']),
+                         ('FAIL', 'PASS', 3, 'PREVIEW_UNAVAILABLE'))
         cv = Mock()
         cv.namedWindow.side_effect = RuntimeError('GUI unavailable')
         with patch.object(camera, 'WINDOWS', True):
@@ -200,6 +303,134 @@ class CameraTests(unittest.TestCase):
         cv.imshow.assert_called_once_with(title, FRAME)
         cv.destroyWindow.assert_called_once_with(title)
         capture.read.assert_not_called()
+
+    def test_windows_preview_starts_display_clock_after_first_event_pump(self):
+        cv = Mock()
+        capture = Mock()
+        capture.read.return_value = True, FRAME
+        for init_delay in (0.1, 8.0, 0.05):  # fast, cold, then warm
+            with self.subTest(init_delay=init_delay):
+                now = [0.0]
+                phases = []
+                messages = []
+                def wait_key(_):
+                    now[0] += init_delay if not phases or phases[-1][0] == 'preview_init' else 0.25
+                    return -1
+                cv.waitKey.side_effect = wait_key
+                with patch.object(camera.time, 'monotonic', side_effect=lambda: now[0]):
+                    outcome, timing = camera.preview_windows(
+                        cv, capture, FRAME, 0, 1, lambda stage: phases.append((stage, now[0])), messages.append)
+                self.assertEqual(outcome, 'PREVIEW_COMPLETED')
+                self.assertEqual(timing['initialization'], init_delay)
+                self.assertEqual(timing['first_wait_key'], init_delay)
+                self.assertEqual(timing['display'], 1)
+                self.assertEqual([name for name, _ in phases], ['preview_init', 'preview', 'preview_shutdown'])
+                self.assertEqual(phases[1][1], init_delay)
+
+    def test_windows_preview_esc_and_q_close_after_initial_events(self):
+        for key in (27, ord('q'), ord('Q')):
+            with self.subTest(key=key):
+                cv = Mock()
+                cv.waitKey.return_value = key
+                capture = Mock()
+                outcome, _ = camera.preview_windows(cv, capture, FRAME, 0, 5, Mock(), Mock())
+                self.assertEqual(outcome, 'PREVIEW_COMPLETED')
+                cv.imshow.assert_called_once()
+                cv.destroyWindow.assert_called_once()
+                capture.read.assert_not_called()
+
+    def test_windows_preview_failure_keeps_frame_details_in_json_and_cli(self):
+        value = camera.result('FAIL', 'PREVIEW_INIT_TIMEOUT', capture_status='PASS',
+                              width=640, height=480, frames=3, preview='PREVIEW_INIT_TIMEOUT',
+                              preview_step='first_imshow', worker_terminated=True)
+        for json_mode in (True, False):
+            argv = ['camera', '--prefix', sys.prefix, '--device', '0', '--preview']
+            with self.subTest(json_mode=json_mode), patch.object(camera, 'WINDOWS', True), \
+                 patch.object(camera, 'BACKEND', 'DirectShow'), \
+                 patch.object(sys, 'argv', argv + (['--json'] if json_mode else [])), \
+                 patch.object(camera, 'run_worker', return_value=value), \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(camera.main(), 1)
+                if json_mode:
+                    row, = json.loads(output.getvalue())['devices']
+                    self.assertEqual({k: row[k] for k in value}, value)
+                else:
+                    self.assertIn('640x480, 3 consecutive frames', output.getvalue())
+                    self.assertIn('last preview step: first_imshow, capture passed', output.getvalue())
+                    self.assertIn('Camera test: FAIL', output.getvalue())
+
+    def test_windows_preview_process_boundaries_preserve_captured_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / 'preview-worker.py'
+            script.write_text(f'''
+import importlib.util, json, os, sys, time
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location("camera", {camera.__file__!r})
+camera = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(camera)
+camera.WINDOWS = True
+action, target, options = json.loads(sys.argv[2])
+mode = options["fixture_mode"]
+frame = SimpleNamespace(size=640 * 480 * 3, shape=(480, 640, 3))
+def operation(name):
+    if mode == name:
+        time.sleep(60)
+class Capture:
+    reads = 0
+    def open(self, *args): return True
+    def read(self):
+        self.reads += 1
+        if self.reads > 3:
+            operation("active_read")
+            if mode == "exit": os._exit(3)
+            time.sleep(0.01)
+        return True, frame
+    def release(self):
+        operation("release")
+        if mode == "release_error": raise OSError()
+class CV:
+    WINDOW_NORMAL = 0
+    VideoCapture = Capture
+    def currentUIFramework(self): return "fixture"
+    def namedWindow(self, *args):
+        if mode == "slow": time.sleep(0.55)
+    def imshow(self, *args): operation("imshow")
+    def waitKey(self, *args):
+        operation("waitKey")
+        return -1
+    def destroyWindow(self, *args): operation("destroy")
+camera.open_cv = lambda: (CV(), 700)
+camera.worker(action, target, options)
+''', encoding='utf-8')
+            options = OPTIONS | {'preview': True, 'preview_seconds': 0.3, 'preview_init_timeout': 0.35,
+                                 'capture_timeout': 0.2}
+            with patch.object(camera, 'WINDOWS', True), patch.object(camera, '__file__', str(script)), \
+                 patch.object(subprocess, 'CREATE_NEW_PROCESS_GROUP',
+                              getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0), create=True):
+                slow = camera.run_worker('test', 0, options | {'fixture_mode': 'slow', 'preview_init_timeout': 2})
+                warm = camera.run_worker('test', 0, options | {'fixture_mode': 'warm'})
+                for value in (slow, warm):
+                    self.assertEqual((value['status'], value['frames'], value['preview']),
+                                     ('PASS', 3, 'PREVIEW_COMPLETED'))
+                    self.assertGreaterEqual(value['preview_timing']['display'], 0.3)
+                self.assertGreaterEqual(slow['preview_timing']['initialization'], 0.5)
+                cases = [
+                    ('imshow', 'PREVIEW_INIT_TIMEOUT', 'first_imshow', True),
+                    ('waitKey', 'PREVIEW_INIT_TIMEOUT', 'first_wait_key', True),
+                    ('active_read', 'PREVIEW_TIMEOUT', None, True),
+                    ('destroy', 'PREVIEW_SHUTDOWN_TIMEOUT', None, True),
+                    ('release', 'SHUTDOWN_TIMEOUT', None, True),
+                    ('exit', 'PREVIEW_WORKER_EXITED', None, False),
+                    ('release_error', 'CAMERA_CLEANUP_FAILED', None, False),
+                ]
+                for mode, reason, step, terminated in cases:
+                    with self.subTest(mode=mode):
+                        value = camera.run_worker('test', 0, options | {'fixture_mode': mode})
+                        self.assertEqual((value['status'], value['reason'], value['capture_status']),
+                                         ('FAIL', reason, 'PASS'))
+                        self.assertEqual((value['width'], value['height'], value['frames']), (640, 480, 3))
+                        self.assertEqual(value.get('preview_step'), step)
+                        self.assertEqual(value.get('worker_terminated', False), terminated)
 
     def test_cancellation_marks_remaining_devices_skipped(self):
         devices = [camera.Device(1), camera.Device(3), camera.Device(8)]

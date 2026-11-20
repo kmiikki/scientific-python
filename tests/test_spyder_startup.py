@@ -212,7 +212,7 @@ class SpyderStartupTests(unittest.TestCase):
         template=(ROOT/'linux/spyder-launcher.sh').read_text()
         launcher=self.work/'science-spyder'
         launcher.write_text(template.replace('@ROOT@',shlex.quote(str(root))).replace('@MM@',shlex.quote(str(executable))).replace('@ROOT_ID@','fixture'))
-        foreign=self.work/'envs/py314-opencv5-cuda'
+        foreign=self.work/'envs/research-extras'
         env=dict(os.environ,CONDA_PREFIX=str(foreign),MAMBA_ROOT_PREFIX='/foreign-root',
                  MAMBA_EXE='/foreign-mamba',CONDA_EXE='/foreign-conda',PYTHONPATH='/foreign-modules',PYTHONHOME='/foreign-python')
         result=subprocess.run(['bash',str(launcher),'--version'],cwd=Path.home(),env=env,capture_output=True,text=True,timeout=10)

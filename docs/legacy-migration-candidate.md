@@ -1,5 +1,6 @@
-# Iridium migration candidate — v0.9.0 development
+# Legacy installation migration candidate — v0.9.0 development
 
+This historical record describes the v0.9.0 candidate. Its archive commands illustrate how to transfer an exact revision for testing. For the current workflow and release status, see the [Ubuntu guide](ubuntu-installation.md) and [acceptance record](testing.md).
 The previously observed stop happens before solving: the executable-selection path expects a V4 root or promotion receipt, and the Science guard requires a separate environment receipt. Ubuntu LTS V3 wrote neither. The archived V3 installer instead wrote `.scientific-python-installer-state` after its import checks and launcher setup. It recorded the home layout, Python 3.14, Spyder 6.1.7 and Micromamba 2.8.1. The exact historical launcher and package command can corroborate that state; a folder name or package list by itself cannot.
 
 This candidate checks the historical state, safe directory identities, launcher and Conda history, package provenance and V3 anchors. Newer completed states also need the matching in-prefix marker and installed-package fingerprint. A proposed migration is separate from Micromamba promotion and package approval. The migration receipt authorizes updating the same directory and does not permit Science removal before a verified update. No migration changes the root or binary ownership receipts. An unresolved configuration, altered evidence or unsupported historical format must stop; restore trusted original files or choose a separate new root and leave the old prefix in place.
@@ -18,9 +19,9 @@ Run on disposable or explicitly approved targets only. Keep the package plans an
 
 | Host | Confirm before release |
 |---|---|
-| Iridium — Ubuntu 26.04 | Existing root, genuine original metadata, in-place migration, preserved third-party root/cache and other environments; separate binary and package approvals; Python, Spyder and first kernel; CPU PyTorch flow. |
-| HP Z240 — Ubuntu 26.04 | New root defaults, saved configuration and optional selection; visible heartbeat; fresh install and update; Science-only removal and Total Remove rejection/success only on an approved disposable root. Check that a second root and an external environment remain untouched. |
-| Niobium — Ubuntu 24.04 | Verify that the prior CUDA acceptance still applies to the new commit. Recheck existing update, package restrictions, launcher and CUDA runtime on the actual GPU. |
+| Ubuntu 26.04 LTS with an existing environment | Existing root, genuine original metadata, in-place migration, preserved third-party root/cache and other environments; separate binary and package approvals; Python, Spyder and first kernel; CPU PyTorch flow. |
+| Ubuntu 26.04 LTS with a disposable test directory | New root defaults, saved configuration and optional selection; visible heartbeat; fresh install and update; Science-only removal and Total Remove rejection/success only on an approved disposable root. Check that a second root and an external environment remain untouched. |
+| Ubuntu 24.04 LTS with a CUDA-capable GPU | Verify that the prior CUDA acceptance still applies to the new commit. Recheck existing update, package restrictions, launcher and CUDA runtime on the actual GPU. |
 | Windows 11 | Run the isolated Windows PowerShell 5.1 verification script below. For native menu acceptance, review the inventory and whole-root plan using only a disposable target. |
 
 In Windows PowerShell 5.1, from the unpacked project:
@@ -37,11 +38,11 @@ From the development checkout with the intended commit checked out:
 
 ```sh
 git rev-parse HEAD
-git archive --format=zip --prefix=scientific-python-fix-iridium-legacy-migration/ \
-  --output=scientific-python-iridium-test.zip HEAD
-git bundle create scientific-python-fix-iridium-legacy-migration.bundle fix/iridium-legacy-migration
-git bundle verify scientific-python-fix-iridium-legacy-migration.bundle
-sha256sum scientific-python-iridium-test.zip scientific-python-fix-iridium-legacy-migration.bundle
+git archive --format=zip --prefix=scientific-python-legacy-migration/ \
+  --output=scientific-python-legacy-migration-test.zip HEAD
+git bundle create scientific-python-legacy-migration.bundle main
+git bundle verify scientific-python-legacy-migration.bundle
+sha256sum scientific-python-legacy-migration-test.zip scientific-python-legacy-migration.bundle
 ```
 
-Recompute SHA-256 after copying to T9 and again on the destination. `git bundle list-heads` must show `refs/heads/fix/iridium-legacy-migration` at the recorded commit. To check out the candidate on Niobium without changing any remote, use `git clone -b fix/iridium-legacy-migration scientific-python-fix-iridium-legacy-migration.bundle scientific-python-iridium` in a new directory. On Iridium unpack the whole ZIP and run `bash linux/00-menu.sh` from its single top-level folder. Use **I — Info** and **Existing** to verify the selected executable and root before accepting anything.
+Recompute SHA-256 after transfer and compare the results. `git bundle list-heads` should show `refs/heads/main` at the recorded revision. Unpack the whole ZIP and run `bash linux/00-menu.sh` from the extracted project directory. Use **I — Info** and **Existing** to verify the selected executable and directory before accepting anything.

@@ -1,35 +1,33 @@
-Scientific Python: paikallinen Windows-hotfix ja hyväksymistestaus
+# Historical Windows hotfix acceptance
 
-Tämä on paikallinen validointiversio. Asennuksen saa hyväksyä vain käyttäjä.
-OpenCV-tavoite on 5.1.0 Qt6; yhteensopiva HDF5 1.14.6 hyväksytään.
-Käyttäjän konfiguraatioon ei lisätä HDF5 2.2.0 -pinnausta.
+This guide records an earlier local validation build. For current options and acceptance status, see the [Windows installation guide](windows-installation.md) and [test results](testing.md).
 
-1. Sulje Science-Python- ja Spyder-prosessit ja deaktivoi science, jos se on aktiivinen.
-2. Käynnistä tämän toimituksen Windows-valikko. Käytä korjattua paikallista hakemistoa;
-   aiempia patch-tiedostoja ei tarvitse eikä pidä soveltaa siihen uudelleen.
-3. Valitse 1. Tarkista poistettavien riippuvuuksien nimet ja vastaa vain hyväksymällesi
-   listalle `y`. Sen jälkeen tarkista koko transaktio, myös HDF5:n version alennus.
-   Koko transaktiolla on toinen erillinen hyväksyntä; molempien oletus on No.
-4. Jos nimet, versiot tai buildit eroavat toimituksen suunnitelmasta, arvioi uusi
-   näkyvä suunnitelma ennen hyväksyntää. Lukumäärien yhtäläisyys ei riitä.
-5. Kun käyttäjän hyväksymä asennus on onnistunut, suorita alla oleva datatesti.
+The hotfix targeted OpenCV 5.1.0 with Qt6 and accepted the compatible HDF5 1.14.6 runtime. It left the user's package configuration free of an HDF5 2.2.0 pin. The user had to approve any installation.
 
-Esimerkki paikallisen ZIPin purkamisen jälkeen. Korvaa bundle-polku omalla purkuhakemistollasi:
+## Hotfix installation review
+
+1. Close Python and Spyder processes using Science. Deactivate `science` if it is active.
+2. Open the Windows menu from the corrected hotfix directory. That directory already contains the fixes from the earlier patches.
+3. Select option **1**. Review the dependency names proposed for removal and enter `y` only to approve that list. Review the full transaction, including the HDF5 downgrade, at the separate prompt. Both prompts default to No.
+4. If any package name, version or build differs from the original hotfix plan, review the new plan before approval. Compare the exact package identities even if the counts match.
+5. Run the data test below after the approved installation succeeds.
+
+After extracting the historical ZIP, set `$bundle` to its extracted directory.
 
 ```powershell
 $bundle = 'C:\local\scientific-python-windows-hotfix'
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$bundle\windows\00-menu.ps1" -Mode Home
 ```
 
-Päivityksen jälkeinen datatesti
+## Post-installation data test
 
-Avaa uusi PowerShell-istunto, jossa tämän toimituksen skriptit voidaan suorittaa:
+Open a new PowerShell session using the process-scoped execution policy for the historical test scripts.
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass
 ```
 
-Suorita siinä seuraavat rivit. Muuta bundle-polku vastaamaan ZIPin purkuhakemistoa. Tämän koneen täsmälliset komennot ovat toimitusraportissa.
+Run these commands in that session. Set `$bundle` and `$samples` to the extracted directory and the test sample directory.
 
 ```powershell
 $bundle = 'C:\local\scientific-python-windows-hotfix'
@@ -40,48 +38,26 @@ $report = Join-Path $bundle 'post-install-acceptance.json'
 $LASTEXITCODE
 ```
 
-Testin oletukset ovat OpenCV 5.1.0 ja HDF5 1.14.6. Älä ohita näitä odotuksia
-ExpectedOpenCV/ExpectedHDF5-parametreilla päivityksen jälkeisessä hyväksymistestissä.
-Raportin success-arvon tulee olla true, kaikkien tarkistusten PASS ja exit-koodin 0.
+The script defaults to OpenCV 5.1.0 and HDF5 1.14.6. Leave `-ExpectedOpenCV` and `-ExpectedHDF5` at their defaults for the hotfix acceptance test. The expected report has `"success": true`, `PASS` for every check and exit code `0`.
 
-Testi tarkistaa Python 3.14:n, Spyder 6.1.8:n, OpenCV 5.1.0 Qt6:n, FFmpeg 9 GPL:n,
-h5py:n ja netCDF4:n käyttämät HDF5-runtime-versiot sekä libnetcdf-runtime-version.
-Se tekee seuraavat toiminnot uusille tilapäistiedostoille:
+The script checks Python 3.14, Spyder 6.1.8, OpenCV 5.1.0 with Qt6, FFmpeg 9 GPL, the HDF5 runtime versions used by h5py and netCDF4, and the libnetcdf runtime version. It exercises the following operations using new temporary files.
 
-- HDF5: moniulotteinen NumPy-taulukko, gzip, shuffle, Fletcher32 ja metadata-
-  attribuutit; tietojen täsmällinen takaisinluku.
-- netCDF4: moniulotteinen pakattu aineisto, dimensioiden ja numeeristen arvojen
-  takaisinluku sekä xarray/netCDF4-kierros.
-- PyArrow: taulukon Parquet-kirjoitus ja täsmällinen takaisinluku.
-- OpenCV: PNG-koodaus/dekoodaus ja kuuden FFV1-videokehyksen häviötön
-  kirjoitus/takaisinluku nimenomaan FFmpeg-backendilla.
-- Qt6 HighGUI- ja FFmpeg Video I/O -tuki OpenCV:n build-tiedoista. Automaattinen
-  testi ei avaa GUI-ikkunaa eikä kameraa. Natiivi ikkuna-/Spyder-testi tehdään erikseen.
+- **HDF5.** Write a multidimensional NumPy array with gzip, shuffle, Fletcher32 and metadata attributes, then verify exact readback.
+- **netCDF4.** Write compressed multidimensional data, verify the dimensions and values, and test an xarray round trip using the netCDF4 backend.
+- **PyArrow.** Write a table to Parquet and verify exact readback.
+- **OpenCV.** Encode and decode a PNG, then write and read six lossless FFV1 video frames through the FFmpeg backend.
+- **Build capabilities.** Check OpenCV build information for Qt6 HighGUI and FFmpeg Video I/O support. The automated test checks these capabilities without opening a GUI window or camera. Check Spyder and its GUI separately.
 
-Roundtrip-tiedostot poistetaan testin päättyessä. HDF5 2.2.0:lla ennen päivitystä
-luodut pienet sample-tiedostot ovat toimituksen testisyötteitä. Ne avataan vain
-read-only-tilassa ja niiden SHA-256 tarkistetaan ennen ja jälkeen. Testi ei poista
-syötetiedostoja eikä koske olemassa oleviin tieteellisiin aineistoihin.
+The test removes its temporary round-trip files when it finishes. It opens the supplied HDF5 2.2.0 samples read-only and compares their SHA-256 digests before and after the read. It preserves the input samples and existing scientific data.
 
-Samplet kattavat tavallisen float64-taulukon, gzip/shuffle/Fletcher32-suodattimet,
-attribuutit ja earliest/latest-kirjoitusasetukset. Onnistunut testi ei todista
-kaikkien HDF5 2.x -tiedostopiirteiden, suodattimien tai datatyyppien tukea.
-Mahdollinen lukemisvirhe raportoidaan FAIL-tuloksena. Omia HDF5 2.x -näytteitä
-voi antaa SampleHdf5-listassa; alkuperäisiä tiedostoja ei muokata.
+The samples exercise an ordinary `float64` array, gzip, shuffle, Fletcher32 and attributes with the `earliest` and `latest` file format settings. A passing run covers those sample features. A read error is reported as `FAIL`. Provide other HDF5 2.x samples with `-SampleHdf5` to check the files you need.
 
-Lopuksi käynnistä Spyder tavallisella Scientific Python -pikakuvakkeella ja
-tarkista samat importit/versionumerot sen kernelissä. GPU/CUDA-toimivuutta ei
-ole varmennettu näillä CPU-/data-/media-testeillä.
+Finally, open Spyder using the usual Scientific Python shortcut and verify the same imports and version numbers in its kernel. These CPU, data and media checks leave GPU and CUDA acceptance to a separate test.
 
-Kehityksen aikana datatestin toiminta tarkistettiin vanhalla, toimivalla
-OpenCV 5.0.0 / HDF5 2.2.0 -runtimella odotuksia erikseen muuttamalla.
-Tämä todentaa testin roundtrip-koodin, ei vielä päivitetyn runtimen toimivuutta.
+During development, the round-trip test ran successfully on the older OpenCV 5.0.0 and HDF5 2.2.0 runtime with adjusted version expectations. That run verified the test code. The updated runtime required its own acceptance run.
 
-Patchit Niobiumia varten
+## Historical patch bundles
 
-scientific-python-windows-all-hotfixes.patch sisältää kaikki Windows-hotfixit
-alkuperäiseen kehityslähteeseen. scientific-python-windows-callback-hotfix.patch
-sisältää vain tämän kierroksen eron edelliseen paikalliseen hotfixiin.
-Valitse lähtöversiota vastaava patch. Älä sovella molempia tai vanhoja patcheja
-päällekkäin. Ennen myöhempää soveltamista käytä git apply --check -tarkistusta.
-GitHubia, tageja ja julkaistua v0.1.0-pakettia ei muutettu.
+`scientific-python-windows-all-hotfixes.patch` contained all Windows hotfixes against the original development source. `scientific-python-windows-callback-hotfix.patch` contained the changes from the preceding local hotfix to that validation build. Each patch targeted a different starting revision. Apply only the patch for that revision and verify it first with `git apply --check`.
+
+GitHub, tags and the published v0.1.0 bundle remained unchanged during the hotfix work.

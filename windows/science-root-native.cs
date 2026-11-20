@@ -25,7 +25,11 @@ public static class ScienceRootNative {
     static SafeFileHandle Open(string path, bool remove, bool exclusive) {
         SafeFileHandle h = CreateFileW(@"\\?\" + path, remove ? 0x10080u : 0x80u, exclusive ? 0u : 3u,
             IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
-        if (h.IsInvalid) { int error=Marshal.GetLastWin32Error(); h.Dispose(); throw new IOException(path, new Win32Exception(error)); }
+        if (h.IsInvalid) {
+            var error = new Win32Exception(Marshal.GetLastWin32Error());
+            h.Dispose();
+            throw new IOException(path + ": " + error.Message, error);
+        }
         return h;
     }
     static FileInfoNative Read(SafeFileHandle h, string path) {
@@ -77,8 +81,10 @@ public static class ScienceRootNative {
             if (dir ? !IdentityMatches(Signature(i),expected) : Signature(i)!=expected)
                 throw new IOException("Path identity changed: " + path);
             var delete=new Disposition { Delete=1 };
-            if (!SetFileInformationByHandle(h,4,ref delete,1))
-                throw new IOException("Windows refused to delete " + path, new Win32Exception());
+            if (!SetFileInformationByHandle(h,4,ref delete,1)) {
+                var error = new Win32Exception(Marshal.GetLastWin32Error());
+                throw new IOException("Windows refused to delete " + path + ": " + error.Message, error);
+            }
         }
     }
 }

@@ -1,5 +1,7 @@
 # Release package additions and verification — v0.1.0
 
+This historical report records the seven-package configuration update. See the [current configuration guide](configuration.md) for v0.9.2.
+
 ## Root cause
 
 The active per-user JSON had 35 direct requests: the original 29 scientific requests plus six foundations. The shared default already had 42, including `shap`, `pywavelets`, `optuna`, `plotly`, `hypothesis`, `polars` and `xgboost`.
@@ -21,7 +23,7 @@ After safe initialization/migration, interactive **Install/update** compares the
 The installer displays absent default requests and asks:
 
 ```text
-Add these release requests to your configuration? [y/N]
+Add these release requests to your configuration? [y/N]:
 ```
 
 The default is **No**. Declining leaves the file bytes, BOM, permissions and timestamp unchanged. Accepting appends only the displayed missing requests; existing entries, constraints, channels and supported settings are preserved. No existing request is removed or replaced. Already represented constrained requests are retained exactly.
@@ -77,7 +79,7 @@ Use a fresh terminal without activating Science. From the updated project folder
 bash linux/00-menu.sh
 ```
 
-1. Choose **1 — Install/update**, then **Existing**, retaining `~/.local/share/mamba` and its current Micromamba executable.
+1. Choose **1 — Install/update Scientific Python**, then **Existing**, retaining `~/.local/share/mamba` and its current Micromamba executable.
 2. Confirm that the configuration proposal lists exactly the seven missing names for the known 35-request configuration. Answer **y**.
 3. Review the separate Micromamba package event, including any version/build changes, and approve it. A failed solve must remain a failure with all requested packages retained.
 4. Confirm that effective configuration verification passes, release-default omissions are empty, and the other-environments check reports preservation. No uninstall/recreation of the root is required.
@@ -102,4 +104,4 @@ bash linux/00-menu.sh
    print("Scientific Python Environment: PASS")
    ```
 
-The interpreter must be inside the selected `envs/science` prefix. Confirm the GNOME/desktop launchers and that unrelated environments, including `py314-opencv5-cuda`, remain available. To check the decline path separately, decline the proposal and verify the active JSON remains byte-for-byte unchanged; verification may pass for that effective selection while the seven default differences remain visible.
+The interpreter must be inside the selected `envs/science` prefix. Confirm the GNOME/desktop launchers and that unrelated environments remain available. To check the decline path separately, decline the proposal and verify the active JSON remains byte-for-byte unchanged; verification may pass for that effective selection while the seven default differences remain visible.

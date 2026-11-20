@@ -72,8 +72,7 @@ function Show-State {
 
 function Show-Info {
     Clear-Host
-    Write-Host 'Scientific Python setup - Info'
-    Write-Host '=============================='
+    Write-ScienceInstallerHeading $ScienceRelease.InstallerVersion
     Write-Host ''
     Write-Host 'Supported installation modes'
     Write-Host '----------------------------'
@@ -107,7 +106,6 @@ function Show-Info {
     }
     Write-Host ''
 
-    Write-Host "Scientific Python $($ScienceRelease.InstallerVersion)"
     Write-Host "Installer layout lineage: V$($ScienceRelease.Version) r$($ScienceRelease.Revision)"
     Write-Host 'Menu actions'
     Write-Host '------------'
@@ -133,12 +131,13 @@ function Show-Info {
     Write-Host '   Note: these settings are user-wide and can also affect another'
     Write-Host '   Spyder installation that uses the same Windows account.'
     Write-Host ''
-    Write-Host '5  Remove science environment'
+    Write-Host '5  Remove Science environment'
     Write-Host '   Removes the complete science environment. This also removes Spyder'
     Write-Host '   and all Python packages installed inside science. Micromamba is kept.'
     Write-Host '   Requires verified installer ownership and separate removal approval.'
     Write-Host ''
-    Write-Host '6  Total Remove: entire verified Micromamba root and its environments'
+    Write-Host 'M  Remove Micromamba installed by Scientific Python'
+    Write-Host '6  Total Remove – delete selected Micromamba directory and all contents'
     Write-Host ''
 
     Write-Host 'Supported layout status'
@@ -241,8 +240,7 @@ function Pause-Menu {
 
 while ($true) {
     Clear-Host
-    Write-Host "Windows - Scientific Python $($ScienceRelease.InstallerVersion)"
-    Write-Host '==========================='
+    Write-ScienceInstallerHeading $ScienceRelease.InstallerVersion
     Write-Host ''
     Show-State
 
@@ -255,8 +253,9 @@ while ($true) {
     Write-Host '  3  Show OpenCL patch status'
     Write-Host ''
     Write-Host '  4  Remove Spyder user settings'
-    Write-Host '  5  Remove the science environment'
-    Write-Host '  6  Total Remove: entire verified Micromamba root and its environments'
+    Write-Host '  5  Remove Science environment'
+    Write-Host '  M  Remove Micromamba installed by Scientific Python'
+    Write-Host '  6  Total Remove – delete selected Micromamba directory and all contents'
     Write-Host ''
     Write-Host '  U  USB Camera Test (optional)'
     Write-Host '  D  Diagnostics (redacted)'
@@ -293,8 +292,13 @@ while ($true) {
             try {
                 # Preserve uncertain legacy installations before preparation changes Windows settings.
                 Show-ScienceNewRootConfiguration $layout
-                $null=Initialize-ScienceConfiguration -Root $layout.Root
-                if($optional -and -not (Select-ScienceOptionalPackages)){
+                $interactive=Test-ScienceInteractiveConfiguration
+                $configReview=@{}
+                if($interactive){$configReview.UseExistingReviewer={param($prompt) Read-Host $prompt}}
+                $null=Initialize-ScienceConfiguration -Root $layout.Root @configReview
+                $fresh=-not (Test-Path -LiteralPath $layout.Science)
+                $reviewPyTorch=$optional -or ($fresh -and $interactive)
+                if($reviewPyTorch -and -not (Select-ScienceOptionalPackages -Fresh:$fresh)){
                     Pause-Menu
                     continue
                 }
@@ -328,6 +332,7 @@ while ($true) {
             }
 
             $installArg=if($optional){"$modeArg -SkipReleaseDefaultOffer"}else{$modeArg}
+            if($reviewPyTorch){$installArg+=' -PyTorchSelectionReviewed'}
             $rc = Invoke-Step '02-install-science.ps1' $installArg
             if ($rc -eq 0) {
                 Write-Host ''
@@ -362,6 +367,12 @@ while ($true) {
                 $target=Select-ScienceRemovalRoot $ScienceRelease.MicromambaSha256 -ScienceOnly
                 if($target){[void](Invoke-Step '04-remove-science.ps1' "-Mode '$($target.Mode)'")}
             } catch {Write-Host $_.Exception.Message -ForegroundColor Yellow}
+            Pause-Menu
+            continue
+        }
+
+        '^(?i:m)$' {
+            [void](Invoke-Step '10-remove-micromamba-executable.ps1')
             Pause-Menu
             continue
         }

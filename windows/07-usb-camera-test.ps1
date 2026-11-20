@@ -11,7 +11,8 @@ param(
     [ValidateRange(0.5,30)][double]$OpenTimeout=4,
     [ValidateRange(0.5,60)][double]$CaptureTimeout=4,
     [ValidateRange(1,60)][double]$PreviewSeconds=5,
-    [ValidateRange(1,100)][int]$ProbeLimit=16
+    [ValidateRange(1,100)][int]$ProbeLimit=16,
+    [ValidateRange(0.5,30)][double]$PreviewInitTimeout=12
 )
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'science-integrity.ps1')
@@ -30,6 +31,7 @@ $camera=Join-Path (Get-ScienceSharedDirectory $PSScriptRoot) 'science-camera.py'
 $culture=[Globalization.CultureInfo]::InvariantCulture
 $cameraArgs=@('--prefix', $layout.Science, '--frames', [string]$Frames,
     '--open-timeout', $OpenTimeout.ToString($culture), '--capture-timeout', $CaptureTimeout.ToString($culture),
+    '--preview-init-timeout', $PreviewInitTimeout.ToString($culture),
     '--preview-seconds', $PreviewSeconds.ToString($culture), '--probe-limit', [string]$ProbeLimit)
 if ($explicitIndex) { $cameraArgs+=@('--device', [string]$CameraIndex) }
 if ($ListDevices) { $cameraArgs+='--list' }

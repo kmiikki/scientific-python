@@ -1,6 +1,6 @@
 # Third-party notices and license scope
 
-The [MIT License](LICENSE), copyright © 2026 Kim Miikki, covers this project's installer source and documentation. It does not relicense software downloaded or installed by the scripts.
+The [MIT License](LICENSE) covers this project's installer source and documentation. It does not relicense software downloaded or installed by the scripts.
 
 ## Source review
 

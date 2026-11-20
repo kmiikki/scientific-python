@@ -137,7 +137,7 @@ def _bind_origin(path,root):
         value['Roots'].append(key)
         atomic_write(receipt,(json.dumps(value,indent=2)+'\n').encode())
 
-def initialize(directory,root=None,path=None,legacy=None):
+def initialize(directory,root=None,path=None,legacy=None,reviewer=None):
     """Never infer requested packages from installed package metadata."""
     directory=Path(directory);path=Path(path) if path is not None else active_path()
     existing=root is not None and (Path(root)/'envs/science').exists()
@@ -145,8 +145,12 @@ def initialize(directory,root=None,path=None,legacy=None):
     if legacy is not None and not Path(legacy).is_file() and not path.exists(): raise ConfigError('Explicit legacy configuration is missing; migration stopped.')
     candidates=[path]
     if legacy is not None:candidates.append(Path(legacy))
-    candidates.append(directory/'science-release.json')
-    if root is not None:candidates.append(Path(root)/'share/scientific-python/science-release.json')
+    # Installed snapshots recover settings for an existing Science prefix.
+    # A removed environment may leave this snapshot behind in its root.
+    if existing or root is None:
+        candidates.append(directory/'science-release.json')
+    if existing:
+        candidates.append(Path(root)/'share/scientific-python/science-release.json')
     source=next((p for p in candidates if p.exists() or p.is_symlink()),None)
     if source is None:
         if existing:raise ConfigError('Existing Science environment has no recoverable original configuration. Restore science-release.json; migration stopped and the environment was not changed.')
@@ -158,8 +162,19 @@ def initialize(directory,root=None,path=None,legacy=None):
                 _,origins,key=_origin_known(path,root)
                 if key not in origins['Roots']:
                     previous=next((p for p in candidates[1:] if p.exists() or p.is_symlink()),None)
-                    if previous is None or migrate(read_json(previous),directory)!=value:
-                        raise ConfigError('Existing Science environment has no matching original configuration for this active file. Restore its original science-release.json; migration stopped without changing configuration or environment.')
+                    try:
+                        matches = previous is not None and migrate(read_json(previous), directory) == value
+                    except (ConfigError, OSError, ValueError):
+                        matches = False
+                    if not matches:
+                        original = path.read_bytes()
+                        validate(value, directory)
+                        if (reviewer is None or reviewer(
+                                f'Use the validated package requests from {path} for {root}/envs/science? [y/N]: '
+                        ).strip().lower() not in ('yes', 'y')):
+                            raise ConfigError('Existing Science environment has no matching original configuration for this active file. Select the validated configuration explicitly or restore its original science-release.json.')
+                        if path.read_bytes() != original or read_json(path) != old:
+                            raise ConfigError('Configuration changed during review. Retry with the current file.')
             _bind_origin(path,root)
             return value
         original=source.read_bytes();digest=hashlib.sha256(original).hexdigest()
@@ -198,12 +213,12 @@ def review_new_root_configuration(directory, root, existing_roots, reader=input,
     path = Path(path) if path is not None else active_path()
     _plain_path(path)
     if not path.exists():
-        output('New root will start with the release defaults (PyTorch is not requested).')
+        output('No active configuration. Starting with the release defaults.')
         return
     original = path.read_bytes()
     value = migrate(read_json(path), directory)
     _, origins, selected = _origin_known(path, root)
-    output('New root would use saved configuration: ' + str(path))
+    output('Fresh Science installation would use saved configuration: ' + str(path))
     output('Saved PyTorch choice: ' + pytorch_backend(value['ScientificPackages']).upper())
     if value == defaults(directory):
         return

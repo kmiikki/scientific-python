@@ -1,6 +1,6 @@
 # v0.1.0 release-preparation result
 
-Prepared on 2026-11-17. This report covers the original local preparation. See the [development and publication policy](release-checklist.md) for the current GitHub workflow.
+This historical report covers the original local preparation. See the [v0.9.2 acceptance record](testing.md#v092-ubuntu-2404-lts-acceptance) and the [current publication policy](release-checklist.md).
 
 ## Source changes
 
@@ -35,9 +35,9 @@ The [focused startup fix](spyder-startup-fix.md) corrects sibling-module resolut
 
 The native contract fixtures contain only small generated text files. Test roots, runtimes and caches were kept in RAM-backed `/tmp`; temporary environment roots were cleaned. The existing production Science and other environments were not changed. No broad solver matrix or Bleach rerun was performed.
 
-## Pending acceptance and limits
+## Acceptance pending at the original preparation
 
-Native Windows 11 / PowerShell 5.1, Ubuntu 24.04/26.04 remove/install, full scientific runtime, GUI-connected Spyder/first console, desktop login persistence and optional/GPU combinations remain unaccepted. No automatic rollback, Synchronize, ownership engine or pending-retirement feature is claimed. These checks were pending in the original preparation.
+At the original preparation, native Windows 11 / PowerShell 5.1, Ubuntu 24.04/26.04 remove/install, full scientific runtime, GUI-connected Spyder/first console, desktop login persistence and optional/GPU combinations were pending.
 
 No unresolved approved-plan mismatch remains in the isolated supported executor paths. Unknown or unverifiable native events still stop. A partial native commit can require manual diagnosis; it is not reported as a rollback or success.
 
@@ -47,9 +47,9 @@ The project is initialized locally with an explicit public file allowlist and th
 
 Historical reports and original archives are preserved locally, outside Git. The source-only archive is generated from the tracked file set and checked against the platform manifests; no Micromamba binary, environment, package cache or user configuration is included.
 
-## Markdown review inventory
+## Original Markdown review inventory
 
-All Markdown intended for publication:
+The original preparation reviewed these documents:
 
 - [README](../README.md)
 - [Changelog](../CHANGELOG.md)
@@ -66,4 +66,4 @@ All Markdown intended for publication:
 - [Release package additions](release-package-upgrade.md)
 - [Shared fixture notes](../shared/fixtures/README.md)
 
-The official [MIT license](../LICENSE) contains copyright © 2026 Kim Miikki. No bundled third-party implementation requiring a separate source license was identified in the public-source review; downloaded packages keep their own licenses, including the FFmpeg GPL variant.
+The [MIT license](../LICENSE) contains the project’s legal notice. The public-source review found no bundled third-party implementation requiring a separate source license. Downloaded packages keep their own licenses, including the FFmpeg GPL variant.

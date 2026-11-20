@@ -1,6 +1,6 @@
 # Package configuration and migration
 
-To change the package selection, edit only the active JSON's **`ScientificPackages` list**, save it and select **Install/update**. You do not need a command line, checksum calculator, manifest editor or dependency list.
+To change the package selection, edit only the active JSON's **`ScientificPackages` list**, save it and select **1 — Install/update Scientific Python**. You do not need a command line, checksum calculator, manifest editor or dependency list.
 
 ## Active file
 
@@ -33,21 +33,23 @@ Add `"pingouin"` as another comma-separated item to request it. Replace an exist
 
 ### Optional PyTorch
 
-Open the installer and choose **O — Optional packages**. The menu shows the configured PyTorch backend and whether an NVIDIA device is detectable with the installed driver. Choose **1 — PyTorch CPU** or **2 — PyTorch NVIDIA CUDA**. The installer saves the selected build constraint and continues to **Install/update**. Micromamba checks available builds against Python 3.14, the other requests and, for CUDA, the driver it detects. Review the proposed package changes and approve the transaction to install. A declined transaction leaves the selection saved for the next run.
+A fresh installation on Ubuntu or Windows prints `Configured PyTorch backend:` and offers **0 — No PyTorch (default)**, **1 — PyTorch CPU**, **2 — PyTorch NVIDIA CUDA** and **Q — Back**. Press Enter at `PyTorch [0]:` to choose No PyTorch. The installer prints `No PyTorch selected.`, `PyTorch CPU selected.` or `PyTorch CUDA selected.` before continuing to the next installation step.
 
-Choose **R — Remove the PyTorch request** and confirm to clear the request from the configuration. The operation returns to the menu and leaves installed packages in place. A changed selection saves the previous configuration as `science-release.optional-<SHA-256>.json` in the configuration directory. Selecting the same backend again leaves the configuration bytes and backup history intact.
+Use **O — Configure optional packages and install/update** to change a saved choice. No PyTorch and CPU skip PyTorch GPU and driver checks. Selecting CUDA checks for an NVIDIA device. Installation or update with a saved CUDA request verifies compatibility during dependency resolution. The installer saves the selected build constraint in the active JSON. Review the proposed package changes and approve the transaction to install. A declined transaction leaves the selection saved for the next run.
+
+For an existing environment, choose **R — Remove the PyTorch request** and approve `Remove the configuration request only? [y/N]:`. The installer prints `PyTorch is no longer requested. Installed packages were preserved.` and returns to the menu. A changed selection saves the previous configuration as `science-release.optional-<SHA-256>.json` in the configuration directory. Selecting the same backend again leaves the configuration bytes and backup history intact.
 
 Advanced users can still edit JSON. For example, `"pytorch[version='>=2.13,<3',build='cpu*']"` selects a CPU build within a version range. Plain `"pytorch"` lets Micromamba select the variant. The menu retains version and channel constraints and refuses to overwrite a specific build pin that conflicts with the new backend.
 
-The runtime report records the backend and checks CPU matrix multiplication and autograd. With a working CUDA backend it also verifies the device name and capability, GPU matrix multiplication, CPU–GPU transfers and CUDA synchronization. The [Niobium acceptance test](testing.md#niobium-native-acceptance) passed native installation and GPU execution. See [known limitations](known-limitations.md#configuration-and-updates) for CUDA solver compatibility.
+The runtime report records the backend and checks CPU matrix multiplication and autograd. With a working CUDA backend it also verifies the device name and capability, GPU matrix multiplication, CPU–GPU transfers and CUDA synchronization. Native Ubuntu 24.04 LTS installation and GPU execution passed with v0.9.2 and PyTorch 2.13.0. See the [acceptance record](testing.md#v092-ubuntu-2404-lts-acceptance) and [CUDA limitations](known-limitations.md#configuration-and-updates).
 
 For CUDA, the installer verifies the NVIDIA driver and the lowest compute capability reported by the GPUs. It checks `__cuda` and `__cuda_arch` through Micromamba. If the installed Toolkit masks the driver capability, the verified driver value is passed only to the installer’s Micromamba subprocesses. A verified architecture override is passed only if Micromamba reports the matching virtual package after probing it. Micromamba 2.10.0 ignores that architecture override. The installer checks the minimum declared by conda-forge’s selected `cuda-arch` package in the resolved plan.
 
 The solver first seeks a CUDA runtime no newer than the driver’s reported CUDA minor version. For CUDA 13 on an NVIDIA R580-or-newer driver, a CUDA-version dependency conflict can trigger a second solve within CUDA 13. The installer checks the conda-forge runtime metadata, preserves the other package constraints and shows the minor-version compatibility caveat before approval.
 
-To test a CUDA installation, choose **O — Optional packages → 2 — PyTorch NVIDIA CUDA** and review the resolved plan. Approve only when you are ready to install. The post-install report must show `backend=cuda`, the NVIDIA device name and compute capability. CPU matrix multiplication, autograd, CUDA tensor allocation and matrix multiplication, transfers in both directions and CUDA synchronization must pass alongside the scientific runtime checks.
+For a CUDA installation, select **2 — PyTorch NVIDIA CUDA** in the fresh-install menu or through **O**. Review the resolved plan before approving. Check `backend: "cuda"`, the device name and compute capability in the runtime report alongside the scientific checks.
 
-Torchvision, LightGBM and Pingouin are also optional. Torchvision can bring PyTorch as a dependency.
+Torchvision, LightGBM and Pingouin are also optional. Torchvision can bring PyTorch as a dependency. A fresh No PyTorch installation stops before approval if the solver selects PyTorch through another request.
 
 Keep valid JSON: double-quoted strings, commas between items and no trailing comma or comments. Duplicate package names and conflicting repeated requests are rejected. The installer accepts named Conda MatchSpecs; Micromamba performs final dependency and MatchSpec semantic validation.
 
@@ -74,7 +76,7 @@ Your editable JSON is **excluded from fixed SHA256 manifests**. It receives UTF-
 ## Migration rules
 
 1. An already valid active schema-v1 JSON is kept byte-for-byte, including its timestamp. Repeating migration is idempotent.
-2. The installer searches for matching legacy configuration in the installer folder and selected root's support location. Ubuntu uses `<root>/share/scientific-python/science-release.json`; Windows uses `<root>/science-release.json`.
+2. The installer searches the installer folder and the selected root's support location for prior configuration. Ubuntu uses `<root>/share/scientific-python/science-release.json` to recover configuration for an existing Science prefix. Windows uses `<root>/science-release.json` for the same purpose. A fresh installation with no active file starts from release defaults. If the active file validates and the prior file differs or is missing, an interactive install/update can associate the active file with the selected root after confirmation.
 3. Existing user additions, removals, channels, versions and build restrictions are preserved. Missing foundation requests can be constructed from the legacy foundation fields. The seven new defaults are not silently appended to an old user list.
 4. Before writing migrated configuration, the installer saves the original bytes alongside the active file as `science-release.legacy-<hash>.json`. It computes the filename itself and preserves the original source file.
 5. Legacy Windows JSON without a package list needs its **matching original `science-release.ps1` in the same legacy folder**. The literal `Get-SciencePackageSpecs` array is parsed without executing the source. Unsupported dynamic code or missing source stops migration with recovery instructions.

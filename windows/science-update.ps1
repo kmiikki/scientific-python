@@ -106,8 +106,15 @@ function Assert-SciencePlan {
     }
     return $after
 }
+function New-SciencePackageProgress {
+    if(-not ('SciencePackageProgress' -as [type])){
+        Add-Type -Path (Join-Path $PSScriptRoot 'science-package-progress.cs') -ErrorAction Stop
+    }
+    return [SciencePackageProgress]::new('PowerShell: preparing approved transaction',5000)
+}
+
 function Invoke-ScienceNative {
-    param([string]$Executable,[string[]]$Arguments,[hashtable]$Environment=@{})
+    param([string]$Executable,[string[]]$Arguments,[hashtable]$Environment=@{},$PackageProgress,[string]$NativeActivity)
     $psi=New-Object Diagnostics.ProcessStartInfo
     $psi.FileName=$Executable
     $psi.Arguments=(@($Arguments | ForEach-Object { ConvertTo-ScienceWindowsArgument $_ }) -join ' ')
@@ -122,12 +129,13 @@ function Invoke-ScienceNative {
     try {
         if (-not $process.Start()) { throw 'Could not start the transaction process.' }
         $started=$true
+        if($PackageProgress){$PackageProgress.SetActivity($NativeActivity,$process)}
         $packagePhase=($Arguments -ccontains '--offline' -and $Arguments -ccontains '--file' -and $Arguments -ccontains '--json')
         if ($packagePhase) {
             $buffers=@([pscustomobject]@{Reader=$process.StandardOutput; Data=(New-Object char[] 8192); Text=(New-Object Text.StringBuilder); Task=$null; Overflow=$false},
                        [pscustomobject]@{Reader=$process.StandardError; Data=(New-Object char[] 8192); Text=(New-Object Text.StringBuilder); Task=$null; Overflow=$false})
             foreach($buffer in $buffers){$buffer.Task=$buffer.Reader.ReadAsync($buffer.Data,0,$buffer.Data.Length)}
-            $clock=[Diagnostics.Stopwatch]::StartNew();$next=5;$limit=32MB
+            $clock=[Diagnostics.Stopwatch]::StartNew();$limit=32MB
             while ($null -ne $buffers[0].Task -or $null -ne $buffers[1].Task -or -not $process.HasExited) {
                 foreach($buffer in $buffers){
                     if($null -eq $buffer.Task -or -not $buffer.Task.IsCompleted){continue}
@@ -137,10 +145,6 @@ function Invoke-ScienceNative {
                     if($keep -gt 0){[void]$buffer.Text.Append($buffer.Data,0,$keep)}
                     if($keep -lt $count){$buffer.Overflow=$true}
                     $buffer.Task=$buffer.Reader.ReadAsync($buffer.Data,0,$buffer.Data.Length)
-                }
-                if($clock.Elapsed.TotalSeconds -ge $next -and -not $process.HasExited){
-                    Write-Host ('[6/9] Installing packages  RUNNING  Elapsed: '+$clock.Elapsed.ToString('hh\:mm\:ss')+'  Micromamba process: ACTIVE')
-                    $next=$clock.Elapsed.TotalSeconds+5
                 }
                 if($clock.Elapsed.TotalMinutes -ge 30){throw 'Micromamba did not finish within 30 minutes. Check the interrupted transaction and do not retry blindly.'}
                 if(-not (($null -ne $buffers[0].Task -and $buffers[0].Task.IsCompleted) -or ($null -ne $buffers[1].Task -and $buffers[1].Task.IsCompleted))){Start-Sleep -Milliseconds 25}
@@ -158,6 +162,7 @@ function Invoke-ScienceNative {
         return @{ExitCode=$process.ExitCode;Stdout=$stdout.GetAwaiter().GetResult();Stderr=$stderr.GetAwaiter().GetResult()}
     } finally {
         if($started -and -not $process.HasExited){try {$process.Kill();[void]$process.WaitForExit(5000)} catch {Write-Warning 'Could not confirm interruption of the Micromamba process.'}}
+        if($PackageProgress){$PackageProgress.SetActivity('PowerShell: processing and verifying Micromamba results')}
         $process.Dispose()
     }
 }
@@ -315,7 +320,8 @@ function Confirm-ScienceDependencyRemovals {
     return ((Read-Host 'Remove exactly these dependency packages? [y/N]').Trim() -match '^(?i:y|yes)$')
 }
 function Invoke-ScienceReviewedTransaction {
-    param($Layout,$Before,$Plan,[string]$ConfigPath,[string[]]$RepairNames=@(),[scriptblock]$OnCommit,[hashtable]$CudaOverrides=@{})
+    param($Layout,$Before,$Plan,[string]$ConfigPath,[string[]]$RepairNames=@(),[scriptblock]$OnCommit,
+          [hashtable]$CudaOverrides=@{},[scriptblock]$VerifyPackages)
     if(-not (Test-ScienceInteractiveConfiguration)){throw 'Non-interactive package transactions are not permitted.'}
     $removals=@(Get-ScienceRemovalCandidates $Before $Plan $Layout.Science)
     if($removals.Count -and -not (Confirm-ScienceDependencyRemovals $removals $Before)){throw 'Dependency removals cancelled; no package transaction was started.'}
@@ -330,20 +336,28 @@ function Invoke-ScienceReviewedTransaction {
     }
     $identity=Get-ScienceTextDigest ($lock|ConvertTo-Json -Depth 64 -Compress)
     if(-not (Confirm-ScienceTransaction $lock $identity)){throw 'Transaction cancelled; no package commit was started.'}
-    $directory=Join-Path $Layout.Tmp ('science-transaction-'+[Guid]::NewGuid().ToString('N'))
-    Assert-ScienceTransactionPath $directory;[void][IO.Directory]::CreateDirectory($directory)
-    Write-Host ('Transaction evidence: '+$directory)
+    $packageProgress=New-SciencePackageProgress
     $context=@{Guard=$null}
     try {
+        $directory=Join-Path $Layout.Tmp ('science-transaction-'+[Guid]::NewGuid().ToString('N'))
+        Assert-ScienceTransactionPath $directory;[void][IO.Directory]::CreateDirectory($directory)
+        Write-Host ('Transaction evidence: '+$directory)
         # Keep caller scope: GetNewClosure creates a module that hides our helpers.
         $callback={
             Assert-ScienceNotInUse $Layout
             $context.Guard=Start-ScienceGtkGuard $Layout $Before
             if($OnCommit){& $OnCommit}
         }
-        $null=Invoke-ScienceLockedTransaction $Layout $lock $directory $ConfigPath $identity $callback -CudaOverrides $CudaOverrides
-    } finally {Stop-ScienceGtkGuard $context.Guard $Layout}
-    Update-SciencePixbufCache $Layout
+        try {
+            $null=Invoke-ScienceLockedTransaction $Layout $lock $directory $ConfigPath $identity $callback -CudaOverrides $CudaOverrides -PackageProgress $packageProgress
+        } finally {Stop-ScienceGtkGuard $context.Guard $Layout}
+        $packageProgress.SetActivity('PowerShell: verifying the GTK package cache')
+        Update-SciencePixbufCache $Layout
+        if($VerifyPackages){
+            $packageProgress.SetActivity('PowerShell: verifying installed package constraints')
+            & $VerifyPackages
+        }
+    } finally {$packageProgress.Dispose()}
 }
 function Get-SciencePreparedInstallationState {
     param($Layout)
@@ -365,6 +379,17 @@ function Assert-ScienceOwnedPrefix {
         throw 'The selected Science prefix lacks matching environment ownership evidence.'
     }
 }
+function Assert-ScienceLegacyPrefixMarker {
+    param($Layout)
+    $path=Join-Path $Layout.Science '.science-environment-owner'
+    if(-not (Test-Path -LiteralPath $path)){return}
+    Assert-ScienceRegularPath $path
+    if(([IO.FileInfo]::new($path)).Length -gt 64KB){throw 'The existing Science ownership marker is too large.'}
+    $marker=Read-ScienceJson $path
+    if($marker.id -cnotmatch '^[0-9a-f]{32}$' -or $marker.sid -cne $Layout.Sid -or $marker.prefix -ine $Layout.Science){
+        throw 'The existing Science ownership marker identifies a different user or prefix.'
+    }
+}
 function Assert-ScienceRecordedPrefix {
     param($Layout,$Installed)
     $manifest=Read-ScienceJson (Join-Path $Layout.Root 'science-packages.json')
@@ -375,6 +400,31 @@ function Assert-ScienceRecordedPrefix {
         throw 'The existing Science prefix differs from its last verified package manifest.'
     }
 }
+function Confirm-ScienceLegacyUpdateTarget {
+    param($Layout,$Installed,[string]$ConfigPath,[string]$ConfigHash)
+    $history=Join-Path $Layout.Science 'conda-meta/history'
+    Assert-ScienceRegularPath $history
+    $historySize=([IO.FileInfo]::new($history)).Length
+    Assert-ScienceRegularPath (Join-Path $Layout.Science 'python.exe')
+    if(-not $historySize -or $historySize -gt 16MB -or $Installed.Count -gt 5000 -or
+        -not $Installed.ContainsKey('python') -or -not $Installed.ContainsKey('spyder')){
+        throw 'The selected prefix lacks readable Conda, Python and Spyder installation evidence.'
+    }
+    $null=Get-ScienceRecordSignature @($Installed.Values)
+    $snapshot=Get-SciencePrefixDigest $Layout.Science
+    if(-not (Test-ScienceInteractiveConfiguration)){throw 'Adoption of an existing Science prefix requires an interactive console.'}
+    Write-Host "Existing Science to adopt for in-place update: $($Layout.Science)"
+    Write-Host "Micromamba: $($Layout.Micromamba)"
+    if((Read-Host 'Adopt this Science prefix for update? [y/N]').Trim() -notmatch '^(?i:y|yes)$'){
+        throw 'Adoption of the existing Science prefix was cancelled.'
+    }
+    Assert-ScienceNotInUse $Layout
+    Assert-ScienceLegacyPrefixMarker $Layout
+    if((Get-SciencePrefixDigest $Layout.Science) -cne $snapshot -or (Get-ScienceFileSha256 $ConfigPath) -cne $ConfigHash){
+        throw 'Legacy Science metadata or package requests changed during review; retry.'
+    }
+}
+
 function Find-ScienceApprovedRecovery {
     param($Layout,$Installed,[string]$ConfigHash,$Trace)
     if(-not $Installed.Count){return $null}
@@ -578,6 +628,7 @@ function Invoke-ScienceEnvironmentSync {
             }
             if([IO.Directory]::Exists($Layout.Science)){
                 if($state.science_owner_id){Assert-ScienceOwnedPrefix $Layout $state}
+                else{Assert-ScienceLegacyPrefixMarker $Layout}
                 if($state.finalization_stage -cne 'complete' -or -not $state.science_owner_id){
                     Start-ScienceUpdatePhase $Trace 'Installed identities for legacy or interrupted update'
                     $before=Get-ScienceRecords $Layout.Science
@@ -606,8 +657,15 @@ function Invoke-ScienceEnvironmentSync {
                     }
                     if(-not $state.science_owner_id){
                         Start-ScienceUpdatePhase $Trace 'Last verified package manifest'
-                        if(-not $state.last_sync_utc){throw 'The existing Science prefix has no completed installer state or matching approved transaction.'}
-                        Assert-ScienceRecordedPrefix $Layout $before
+                        $recorded=$false
+                        if($state.last_sync_utc){
+                            try{Assert-ScienceRecordedPrefix $Layout $before;$recorded=$true}
+                            catch{Write-Host 'The old package manifest no longer matches the selected prefix.'}
+                        }
+                        if(-not $recorded){
+                            Start-ScienceUpdatePhase $Trace 'Existing Science adoption review'
+                            Confirm-ScienceLegacyUpdateTarget $Layout $before $configPath $initialConfigHash
+                        }
                     }
                 }
             }
@@ -652,6 +710,9 @@ function Invoke-ScienceEnvironmentSync {
         $plan=Invoke-ScienceMambaJson $Layout $solveArguments @solveArgs
         Start-ScienceUpdatePhase $Trace 'Solver result verification'
         $after=Assert-SciencePlan $plan $before $floors $Packages
+        if($verb -eq 'create' -and $torchBackend -ceq 'none' -and (Get-SciencePyTorchBackend @($after.Keys)) -cne 'none'){
+            throw 'The fresh-install plan includes PyTorch as a dependency. Review the requests that require PyTorch or select CPU or CUDA before retrying.'
+        }
         if($cuda){
             $minor=Assert-ScienceCudaSolution $after $cuda
             $plan|Add-Member -NotePropertyName cuda_compatibility -NotePropertyValue ([ordered]@{
@@ -686,9 +747,10 @@ function Invoke-ScienceEnvironmentSync {
             return
         }
         Start-ScienceUpdatePhase $Trace 'Package transaction review and execution if approved'
-        Invoke-ScienceReviewedTransaction $Layout $before $plan $configPath -OnCommit $onCommit @cudaArgs
-        Start-ScienceUpdatePhase $Trace 'Installed identities and finalization'
-        $null=Assert-SciencePlan ([pscustomobject]@{success=$true;actions=$null}) (Get-ScienceRecords $Layout.Science) $floors $Packages
+        Invoke-ScienceReviewedTransaction $Layout $before $plan $configPath -OnCommit $onCommit -VerifyPackages {
+            Start-ScienceUpdatePhase $Trace 'Installed identities and finalization'
+            $null=Assert-SciencePlan ([pscustomobject]@{success=$true;actions=$null}) (Get-ScienceRecords $Layout.Science) $floors $Packages
+        } @cudaArgs
         Write-Host 'Approved package identities and GTK cache checks passed.'
         if($AfterSync){& $AfterSync $state $null}
         Complete-ScienceUpdatePhase $Trace

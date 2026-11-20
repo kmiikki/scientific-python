@@ -1,74 +1,52 @@
-Windows: native commitin diagnostiikka ja keskeytynyt viimeistely
+# Windows native commit diagnostics and interrupted finalization
 
-Native-prosessin success=true ei yksin tarkoita hyväksyttyä transaktiota.
-Suorittaja tarkistaa edelleen exit-koodin, yhden täydellisen JSON-objektin,
-success-arvon, prefixin, hyväksytyt LINK/UNLINK-identiteetit ja asennetun
-lopputilan identiteetit. Koodi ei hyväksy nonzero-exitiä JSONin perusteella.
+The executor verifies the process exit code, one complete JSON object, the `success` value, the target prefix, the approved `LINK` and `UNLINK` identities, and the final installed package identities. A nonzero exit code fails verification even when the JSON reports `success=true`.
 
-Pakettien post-link-skriptit voivat kirjoittaa stdoutiin ennen Micromamban
-JSON-objektia. Esimerkiksi spyder-base siirtää gui-64.exe:n spyder.exe:ksi
-ja move-komento tulostaa siirtoviestin. Transaction JSON luetaan nyt yhdestä
-loppuun päättyvästä objektista käyttäen myös yhteistä StrictJson-tarkistusta.
-Useita objekteja, perässä olevaa muuta tekstiä tai identiteettieroja ei hyväksytä.
+Package post-link scripts can write to stdout before Micromamba's JSON object. For example, `spyder-base` moves `gui-64.exe` to `spyder.exe`, and `move` prints a message. The executor parses one complete JSON object at the end of the output and checks it with the shared StrictJson validator. It rejects multiple objects, trailing text and identity mismatches.
 
-Jokainen natiivi vaihe tallentaa transaktion evidence-hakemistoon alihakemiston:
+Each native phase writes diagnostics to a subdirectory of the transaction evidence directory.
 
-- native-approved-archive-extraction
-- native-locked-preflight
-- native-locked-commit
+- `native-approved-archive-extraction`
+- `native-locked-preflight`
+- `native-locked-commit`
 
-Niissä ovat result.json (todellinen prosessin exit-koodi ja peitetyt argumentit),
-stdout.txt ja stderr.txt. URL:t, tunnukset ja tokenit peitetään ennen kirjoitusta.
-Tiedostot tallennetaan ennen exit-koodin tarkistusta tai JSON-jäsennystä.
+Each subdirectory contains `result.json` with the actual exit code and redacted arguments, plus `stdout.txt` and `stderr.txt`. The executor redacts URLs, credentials and tokens before writing the files. It saves the diagnostics before checking the exit code or parsing JSON.
 
-commit-verification.json kertoo tarkan viimeisen vaiheen:
+## Commit verification stages
 
-- native-commit: natiivikutsun käynnistys
-- save-native-diagnostics: paluukoodin ja tulosteiden tallennus
-- native-exit: natiivin prosessin exit-koodin tarkistus
-- native-json: JSON-jäsennys
-- native-success: JSONin success-arvon tarkistus
-- reported-prefix: native-vastauksen kohdeprefix
-- approved-link-unlink-identities: hyväksyttyjen toimintojen identiteettivertailu
-- write-committed-plan: committed-plan.json-tallennus
-- installed-identities: asennettujen pakettien lopputila
-- restore-source-metadata: alkuperäisten HTTPS-lähdetietojen palautus metatietoihin
-- final-input-integrity: lukon ja syötetiedostojen lopputarkistus
-- complete: kaikki yllä olevat tarkistukset päättyivät onnistuneesti
+`commit-verification.json` records the last stage reached.
 
-completed=true asetetaan vain viimeisessä vaiheessa. Myös committed-plan.jsonin
-olemassaolo yksin on riittämätön todiste asennuksen koko viimeistelyn onnistumisesta.
+| Stage | Check or action |
+| --- | --- |
+| `native-commit` | Start the native process. |
+| `save-native-diagnostics` | Save the exit code and process output. |
+| `native-exit` | Check the native exit code. |
+| `native-json` | Parse the native JSON. |
+| `native-success` | Check the JSON's `success` value. |
+| `reported-prefix` | Verify the prefix reported by the native process. |
+| `approved-link-unlink-identities` | Compare the reported actions with the approved package identities. |
+| `write-committed-plan` | Write `committed-plan.json`. |
+| `installed-identities` | Verify the final installed package identities. |
+| `restore-source-metadata` | Restore the original HTTPS source URLs in the package metadata. |
+| `final-input-integrity` | Recheck the lock and input files. |
+| `complete` | All checks above succeeded. |
 
-Puuttuvien käynnistimien erillinen korjaus
+The executor sets `completed=true` only at `complete`. Use the final installation status to verify that installer finalization succeeded. `committed-plan.json` records the native commit plan.
 
-09-repair-launchers.ps1 ei käynnistä asenninta, solveria tai pakettitransaktiota.
-Se vertaa nykyisiä paketti-identiteettejä valitun transaktion approved-lock.jsonin
-after-joukkoon ja tarkistaa konfiguraation, Micromamban hashin, tuetun Home/Safe-
-rootin sekä perustapakettien rajaukset. Oletuksena se vain raportoi suunnitelman.
+## Repair missing launchers separately
 
-Esimerkki PowerShellissä (korvaa polut todellisella evidence-hakemistolla):
+`09-repair-launchers.ps1` compares the installed package identities with the `after` set in the selected transaction's `approved-lock.json`. It verifies the package configuration, Micromamba hash, supported Home or Safe layout, and foundation package constraints. By default it reports the repair plan. This entry point runs without invoking the installer body, solver or a package transaction.
+
+In PowerShell, substitute the extracted project path and the actual transaction evidence directory.
 
 ```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "C:\local\scientific-python-windows-hotfix\windows\09-repair-launchers.ps1" -Mode Home -TransactionDirectory "C:\Users\YOUR_USER\micromamba\tmp\science-transaction-EXACT_ID"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "C:\local\scientific-python-windows-hotfix\windows\09-repair-launchers.ps1" -Mode Home -TransactionDirectory "C:\Users\<username>\micromamba\tmp\science-transaction-<transaction-id>"
 ```
 
-Vasta tarkistuksen jälkeen voit lisätä -Apply-valinnan. Skripti vaatii interaktiivisen
-konsolin, varmistaa ettei ympäristö ole käytössä ja kysyy erillisen hyväksynnän,
-jonka oletus on No. Sulje Spyder ja deaktivoi science ennen korjausta. Korjaus
-käyttää alkuperäisen eheystarkistetun asentimen Install-SpyderLauncher-funktiota;
-se kopioi myös science-launcher-common.ps1-aputiedoston samaan rootiin.
-Asentimen runkoa ei suoriteta. Olemassa olevien eri kohteeseen osoittavien
-pikakuvakkeiden suojaukset säilyvät.
+Review the plan before adding `-Apply`. Close Spyder and deactivate `science` before the repair. The script requires an interactive console, checks that the environment is idle and asks for separate approval with No as the default.
 
-Launcher-only-korjaus luo start-spyder.ps1:n, science-spyder.cmd:n ja työpöydän
-Spyder-pikakuvakkeen. Se ei luo jälkikäteen väitettyä native commit -kuittia eikä
-muuta conda-meta-tietoja, package-source-URL:eja tai installerin last_sync-aikaa.
-Niiden mahdollinen viimeistely on erillinen, saman identiteettivarmennuksen vaativa
-huoltotoimi; pakettien uudelleenasennusta ei tarvita pelkkään metadata-/launcher-
-viimeistelyyn. Vanhaa tuntematonta native exit-koodia ei pidä keksiä.
+The repair loads `Install-SpyderLauncher` from the integrity-checked installer and copies `science-launcher-common.ps1` to the selected root. It creates `start-spyder.ps1`, `science-spyder.cmd` and the desktop Spyder shortcut. Existing shortcuts pointing elsewhere remain protected. The repair leaves `conda-meta`, package-source URLs and `last_sync` unchanged. It leaves any unrecorded native commit receipt or exit code unknown. Source metadata finalization is a separate maintenance operation that requires the same package identity verification. Metadata or launcher finalization can use the installed packages as they are.
 
-Havaittu tuore asennus oli paketti-identiteettien osalta valmis, vaikka viimeistely
-keskeytyi. Vanhoista evidence-tiedostoista puuttuivat native exit/stdout/stderr,
-joten historiallisen ajon poistumiskoodi jää epävarmaksi. Siirtoviestin aiheuttama
-JSON-jäsennysvirhe toistettiin erillisessä inertissä fikstuurissa, eikä tämän
-diagnoosin aikana ajettu uutta live-pakettitransaktiota.
+## Historical finding
+
+The observed fresh installation reached the approved package identities before installer finalization stopped. The older evidence did not include the native exit code, stdout or stderr, so its exit code remains unknown. An isolated inert fixture reproduced the JSON parsing failure caused by the file-move message. The investigation used that fixture without running another live package transaction.

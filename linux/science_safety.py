@@ -97,6 +97,14 @@ def mount_points():
     return result
 
 
+def require_delete_permission(parent, parent_info, path, info):
+    if not os.access(parent, os.W_OK | os.X_OK, effective_ids=True):
+        raise SafetyError('No write/search permission for deletion in directory: ' + str(parent))
+    if (parent_info.st_mode & stat.S_ISVTX
+            and os.geteuid() not in (0, parent_info.st_uid, info.st_uid)):
+        raise SafetyError('Sticky directory prevents deleting entry: ' + str(path))
+
+
 def tree_plan(target, dedicated=False, prefixes=()):
     target=plain_path(target)
     if not target.is_dir(): raise SafetyError('Removal target must be a directory.')
@@ -105,25 +113,31 @@ def tree_plan(target, dedicated=False, prefixes=()):
     for point in mount_points():
         if point==target or point.is_relative_to(target): raise SafetyError('Mounted directory inside removal target: '+str(point))
     info=target.stat(); snapshot={}
-    if dedicated and (info.st_uid != os.getuid() or info.st_mode & 0o022):
-        raise SafetyError('The dedicated root is not exclusively under the current user.')
+    if dedicated:
+        require_delete_permission(target.parent, target.parent.stat(), target, info)
     def failure(error): raise error
     for directory, dirs, files in os.walk(target,followlinks=False,onerror=failure):
         directory=Path(directory)
-        # Nested Python/Conda environments are independent data, even under science.
-        if 'pyvenv.cfg' in files or (directory!=target and 'conda-meta' in dirs and directory not in prefixes):
+        directory_info = directory.lstat()
+        if not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_dev != info.st_dev:
+            raise SafetyError('Directory or filesystem changed during removal planning: ' + str(directory))
+        # A scoped Science-only removal still preserves independent nested environments.
+        if not dedicated and ('pyvenv.cfg' in files or (directory != target and 'conda-meta' in dirs and directory not in prefixes)):
             raise SafetyError('Nested Python/Conda environment must be preserved: '+str(directory))
+        if dedicated and not os.access(directory, os.W_OK | os.X_OK, effective_ids=True):
+            raise SafetyError('No write/search permission for deletion in directory: ' + str(directory))
         for name in dirs+files:
             path=directory/name; entry=path.lstat()
-            if not (stat.S_ISDIR(entry.st_mode) or stat.S_ISREG(entry.st_mode) or stat.S_ISLNK(entry.st_mode)):
+            if not dedicated and not (stat.S_ISDIR(entry.st_mode) or stat.S_ISREG(entry.st_mode) or stat.S_ISLNK(entry.st_mode)):
                 raise SafetyError('Special file inside removal target: '+str(path))
             if stat.S_ISDIR(entry.st_mode) and entry.st_dev!=info.st_dev:
                 raise SafetyError('Filesystem boundary inside removal target.')
             if dedicated:
                 if len(snapshot) >= 750000:
                     raise SafetyError('Dedicated root inventory exceeded the entry limit.')
-                if entry.st_uid != os.getuid() or (stat.S_ISDIR(entry.st_mode) and entry.st_mode & 0o022):
-                    raise SafetyError('Foreign ownership or unsafe directory permissions: '+str(path))
+                if (directory_info.st_mode & stat.S_ISVTX
+                        and os.geteuid() not in (0, directory_info.st_uid, entry.st_uid)):
+                    raise SafetyError('Sticky directory prevents deleting entry: ' + str(path))
                 if stat.S_ISLNK(entry.st_mode) and not path.resolve().is_relative_to(target):
                     raise SafetyError('Link leaves the dedicated root: '+str(path))
             snapshot[str(path.relative_to(target))]=(entry.st_dev,entry.st_ino,entry.st_mode,entry.st_size,entry.st_mtime_ns)

@@ -12,21 +12,47 @@ $work=Join-Path $TempRoot ('science-progress-fixture-'+[guid]::NewGuid().ToStrin
 $null=[IO.Directory]::CreateDirectory($work)
 $fixture=Join-Path $work 'fake-native.ps1'
 [IO.File]::WriteAllText($fixture,@'
-[Console]::Out.WriteLine('{"success":true}')
-[Console]::Error.WriteLine('isolated warning')
-Start-Sleep -Seconds 6
+Start-Sleep -Seconds 11
+[Console]::Out.Write('{"success":true}')
+[Console]::Error.Write('isolated warning')
 exit 17
 '@)
-$ps=Join-Path $PSHOME $(if($PSVersionTable.PSEdition -eq 'Core'){'pwsh.exe'}else{'powershell.exe'})
+$ps=(Get-Process -Id $PID).Path
 try {
-    $all=@(Invoke-ScienceNative $ps @('-NoProfile','-NonInteractive','-File',$fixture,'--offline','--file','--json') 6>&1)
-    $result=@($all|Where-Object {$_ -is [hashtable]})
-    if($result.Count -ne 1 -or $result[0].ExitCode -ne 17){throw 'Native exit code missing or changed.'}
-    if($result[0].Stdout.Trim() -cne '{"success":true}' -or ($result[0].Stderr -split '\r?\n') -cnotcontains 'isolated warning'){
-        throw "Capture mismatch. Stdout: $($result[0].Stdout); stderr: $($result[0].Stderr)"
+    $originalOutput=[Console]::Out
+    $output=[IO.StringWriter]::new()
+    $progress=$null
+    try {
+        [Console]::SetOut($output)
+        $progress=New-SciencePackageProgress
+        $nativeArgs=@('-NoProfile','-NonInteractive','-File',$fixture,'--offline','--file','--json')
+        $result=Invoke-ScienceNative $ps $nativeArgs -PackageProgress $progress -NativeActivity 'Micromamba: applying approved transaction'
+        if($result.ExitCode -ne 17){throw 'Native exit code missing or changed.'}
+        if($result.Stdout.Trim() -cne '{"success":true}' -or $result.Stderr.Trim() -cne 'isolated warning'){
+            throw 'Buffered stdout or stderr was lost.'
+        }
+        Start-Sleep -Seconds 11
+    } finally {
+        if($progress){$progress.Dispose()}
+        [Console]::SetOut($originalOutput)
     }
-    if((($all|ForEach-Object {$_.ToString()}) -join "`n") -notmatch '\[6/9\].*Micromamba process: ACTIVE'){throw 'The heartbeat did not appear while the child was active.'}
-    Write-Host 'PASS native process heartbeat, stdout, stderr and nonzero exit preserved'
+    $captured=$output.ToString()
+    Start-Sleep -Milliseconds 5300
+    if($captured -cne $output.ToString()){throw 'The heartbeat continued after disposal.'}
+    $beats=[regex]::Matches($captured,'(?m)^\[6/9\] Installing packages +RUNNING +Elapsed: (\d+):(\d\d)  ([^\r\n]+)')
+    if($beats.Count -lt 5 -or $beats[0].Groups[1].Value -cne '00' -or $beats[0].Groups[2].Value -cne '00' -or
+        $beats[0].Groups[3].Value -cne 'PowerShell: preparing approved transaction'){throw "Missing installation start or periodic progress. $captured"}
+    $last=-5
+    foreach($beat in $beats){
+        $seconds=60*[int]$beat.Groups[1].Value+[int]$beat.Groups[2].Value
+        if(($seconds-$last) -lt 4 -or ($seconds-$last) -gt 6){throw "Elapsed times repeated or skipped a heartbeat. $captured"}
+        $last=$seconds
+    }
+    foreach($activity in 'Micromamba: applying approved transaction','PowerShell: processing and verifying Micromamba results'){
+        if(@($beats|Where-Object {$_.Groups[3].Value -ceq $activity}).Count -lt 2){throw "Missing heartbeat for $activity. $captured"}
+    }
+    if($captured -cmatch 'ACTIVE'){throw 'The old process-only status was emitted.'}
+    Write-Host 'PASS installation heartbeat before, during and after buffered native execution'
     $root=Join-Path $work 'isolated-root'
     $layout=[pscustomobject]@{Root=$root;Envs=(Join-Path $root 'envs');Science=(Join-Path $root 'envs/science');Micromamba=$fixture}
     $meta=Join-Path $layout.Science 'conda-meta'

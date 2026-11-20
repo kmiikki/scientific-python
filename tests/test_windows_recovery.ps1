@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([string]$TempRoot=[IO.Path]::GetTempPath())
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot
@@ -114,7 +114,7 @@ try {
     Invoke-ScienceEnvironmentSync $layout $requested -AfterSync $complete
     Check ($calls.Finalized -eq 1 -and $calls.Cache -eq 1) 'Accepted recovery did not complete exactly once.'
     # Force both non-recovery paths to the solver boundary; do not run Micromamba.
-    $state.last_sync_utc='2026-11-17T15:40:43Z'
+    $state.last_sync_utc='2000-01-01T00:00:00Z'
     Write-ScienceTransactionJson $layout.State $state
     $legacyManifest=@(foreach($r in $lock.after){
         @{name=$r.name;version=$r.version;build_string=$r.build;platform=$r.subdir;sha256=$r.sha256}
@@ -147,14 +147,22 @@ try {
     Check ((Get-ScienceFileSha256 $layout.State) -ceq $stateBefore -and (Get-ScienceFileSha256 $config) -ceq $configBefore) 'Preflight modified preparation state or configuration.'
     $legacyManifest[0].sha256='f'*64
     Write-ScienceTransactionJson $manifest @{packages=$legacyManifest}
+    [IO.File]::WriteAllText((Join-Path $layout.Science 'conda-meta/history'), 'fixture legacy history')
+    [IO.File]::WriteAllText((Join-Path $layout.Science 'python.exe'), 'never executed')
+    $calls.Approve=$false
     Reject {Invoke-ScienceEnvironmentSync $layout $requested -AfterSync $complete -Trace $trace}
-    Check ($calls.Solves -eq 1 -and $trace.Last -ceq 'Approved transaction evidence') 'Changed manifest did not stop before dry run.'
+    Check ($calls.Solves -eq 1 -and [IO.File]::ReadAllText($trace.Path) -match 'FAIL Existing Science adoption review') 'Declined adoption reached the solver.'
+    $calls.Approve=$true
+    Reject {Invoke-ScienceEnvironmentSync $layout $requested -AfterSync $complete -Trace $trace}
+    Check ($calls.Solves -eq 2) 'Approved legacy adoption did not reach the in-place solver.'
+    Check ((Get-ScienceFileSha256 $layout.State) -ceq $stateBefore -and
+        (Get-ScienceFileSha256 $config) -ceq $configBefore -and -not [IO.File]::Exists($marker)) 'Legacy review modified the installation.'
     $state.science_owner_id=$id
     $state.finalization_stage='complete'
     Write-ScienceTransactionJson $layout.State $state
     Write-ScienceTransactionJson $marker @{id=$id;sid=$layout.Sid;prefix=$layout.Science}
     Reject {Invoke-ScienceEnvironmentSync $layout $requested -AfterSync $complete -Trace $trace}
-    Check ($calls.Solves -eq 2) 'Complete owned prefix did not reach solver without legacy evidence.'
+    Check ($calls.Solves -eq 3) 'Complete owned prefix did not reach solver without legacy evidence.'
     Check ($calls.Finalized -eq 1 -and $calls.Cache -eq 1) 'Unapproved preflight ran finalization.'
     Write-Host 'RESULT recovery and ownership checks passed'
 } finally {
